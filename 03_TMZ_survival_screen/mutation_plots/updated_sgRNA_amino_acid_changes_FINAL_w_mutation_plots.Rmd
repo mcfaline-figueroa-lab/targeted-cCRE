@@ -1,0 +1,1007 @@
+---
+title: "Update sgRNA Mutation Annotations and Protein Domain Plots"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(tidyverse)
+```
+
+
+The purpose of this script is to update the mutation information (amino acid change, mutation type, and clinical significance, etc) for the sgRNAs. When we first designed the guides we had to use a FASTA file as input for guide design because it needed to include the intergenic regions. But because FASTA file was used as input the amino acid codon numbers and the clinical significance are not correct. For the MMR genes (MSH2 and MSH6) guiseppe re-ran the sgRNA design pipeline to get the guides that target the CDS (coding domain sequence) of those genes. When you run the sgRNA pipeline with a gene CDS as input it will give you the correct amino acid changes cause by that mutation and the clinical significance. So in this script I will get rid of the old Amino acid edits, mutation category and clinical significance columns, and replace with the update metadata from when he reran the code with the CDS of the genes. NOTE: this means I will only have this information for sgRNAs targeting MSH2 and MSH6 coding domains, the other sgRNAs will be filled with NA.
+
+
+## Define Paths
+
+```{r paths}
+# Read extended metadata
+extended_metadata_path <- "../../02_targeted_cCRE_screen/outputs/merged_crop_library_samplesheet.csv"
+
+# New design metadata from Giuseppe
+guiseppe_metadata_path <- "../../data/mutation_analysis/sgrna_designs_NG_PAM.txt"
+
+# AS rerun guide design metadata
+AS_guides_path <- "../../data/mutation_analysis/sgrna_designs_AS_final_MSH2_6_STON1_SOCS5.txt"
+
+# AS clinvar annotations metadata
+clinvar_annotations_path <- "../../data/mutation_analysis/clinvar_annotations_AS_final_MSH2_6_STON1_SOCS5.txt"
+
+# BE4max Stouffer's results
+be4max_stouffer_path <- "../outputs_BE4max_TMZ_survival/bottom_1pt5percent_guides_removed_BE4max_plot_df_stouffer_data_final.csv"
+
+# Output path for the updated metadata (saving to same directory for consistency)
+updated_metadata_path <- "./outputs_mutation_plots/merged_crop_library_samplesheet_UPDATED.csv"
+
+output_dir <- "./outputs_mutation_plots"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+```
+
+## Load Data
+
+```{r load_data}
+old_extended_metadata <- read.csv(extended_metadata_path, stringsAsFactors = FALSE)
+print(paste("Loaded old extended metadata with", nrow(old_extended_metadata), "rows."))
+
+# Read Giuseppe's reran designs (Tab-separated)
+guiseppe_updated_MMR_sgRNA_metadata <- read.delim(guiseppe_metadata_path, stringsAsFactors = FALSE, check.names = FALSE)
+colnames(guiseppe_updated_MMR_sgRNA_metadata) <- gsub(" ", ".", colnames(guiseppe_updated_MMR_sgRNA_metadata))
+# Filter to keep only MSH2 and MSH6
+guiseppe_updated_MMR_sgRNA_metadata <- guiseppe_updated_MMR_sgRNA_metadata %>%
+    filter(Gene.Symbol %in% c("MSH2", "MSH6"))
+print(paste("Loaded Giuseppe's designs with", nrow(guiseppe_updated_MMR_sgRNA_metadata), "rows."))
+
+# Read AS reran guides (Tab-separated)
+AS_MSH2_6_STON1_SOCS5_guides <- read.delim(AS_guides_path, stringsAsFactors = FALSE, check.names = FALSE)
+colnames(AS_MSH2_6_STON1_SOCS5_guides) <- gsub(" ", ".", colnames(AS_MSH2_6_STON1_SOCS5_guides))
+
+# Filter to keep only MSH2 and MSH6 and rename to AS_MSH2_MSH6_guides
+AS_MSH2_MSH6_guides <- AS_MSH2_6_STON1_SOCS5_guides %>%
+    filter(Gene.Symbol %in% c("MSH2", "MSH6"))
+
+print(paste("Loaded AS MMR guides with", nrow(AS_MSH2_MSH6_guides), "rows."))
+
+# Read AS clinvar annotations (Tab-separated)
+CLINVAR_annotations_AS_final <- read.delim(clinvar_annotations_path, stringsAsFactors = FALSE, check.names = FALSE)
+colnames(CLINVAR_annotations_AS_final) <- gsub(" ", ".", colnames(CLINVAR_annotations_AS_final))
+print(paste("Loaded AS clinvar annotations with", nrow(CLINVAR_annotations_AS_final), "rows."))
+
+# Read BE4max Stouffer's data (CSV)
+BE4max_stouffer_data <- read.csv(be4max_stouffer_path, stringsAsFactors = FALSE)
+print(paste("Loaded BE4max Stouffer's data with", nrow(BE4max_stouffer_data), "rows."))
+
+# Process BE4max Stouffer's data: Keep specific columns and distinct rows
+BE4max_keep_cols <- c(
+    "GuideID", "guide_type", "df_name", "genomic_start", "genomic_end",
+    "Sequence", "sgRNA", "sgRNA.Strand", "X..edits",
+    "Nucleotide.edits", "Amino.acid.edits", "Mutation.category", "is_significant"
+)
+
+BE4max_stouffer_data <- BE4max_stouffer_data %>%
+    dplyr::select(all_of(BE4max_keep_cols)) %>%
+    distinct()
+
+print(paste("Processed BE4max Stouffer's data to", nrow(BE4max_stouffer_data), "distinct rows."))
+
+# Create AS_MSH2_MSH6_guides_FILTERED based on matches in BE4max_stouffer_data
+# 1. Identify which sgRNAs exist in both by sequence for warning purposes
+seq_matches <- AS_MSH2_MSH6_guides$sgRNA.sequence %in% BE4max_stouffer_data$Sequence
+
+# 2. Filter AS_MSH2_MSH6_guides to only those that match Sequence and Strand perfectly
+# Using semi_join keeps ONLY the columns from AS_MSH2_MSH6_guides
+AS_MSH2_MSH6_guides_FILTERED <- AS_MSH2_MSH6_guides %>%
+    semi_join(BE4max_stouffer_data, by = c("sgRNA.sequence" = "Sequence", "sgRNA.Strand")) %>%
+    distinct()
+
+# 3. Warning Logic: Find sequences that matched by Seq but were excluded because of Strand
+mismatch_seqs <- setdiff(
+    AS_MSH2_MSH6_guides$sgRNA.sequence[seq_matches],
+    AS_MSH2_MSH6_guides_FILTERED$sgRNA.sequence
+)
+
+if (length(mismatch_seqs) > 0) {
+    for (seq in mismatch_seqs) {
+        as_row <- AS_MSH2_MSH6_guides[AS_MSH2_MSH6_guides$sgRNA.sequence == seq, ][1, ]
+        be_row <- BE4max_stouffer_data[BE4max_stouffer_data$Sequence == seq, ][1, ]
+
+        # Check only for strand mismatch
+        if (!identical(as_row$sgRNA.Strand, be_row$sgRNA.Strand)) {
+            message(paste0("WARNING: Mismatch for sgRNA: ", seq, ". Issue(s): sgRNA.Strand"))
+        }
+    }
+}
+
+print(paste("Created AS_MSH2_MSH6_guides_FILTERED with", nrow(AS_MSH2_MSH6_guides_FILTERED), "distinct rows."))
+
+# Create guiseppe_updated_MMR_sgRNA_metadata_FILTERED based on matches in BE4max_stouffer_data
+# 1. Identify sequence matches for warning purposes
+guiseppe_seq_matches <- guiseppe_updated_MMR_sgRNA_metadata$sgRNA.sequence %in% BE4max_stouffer_data$Sequence
+
+# 2. Filter Giuseppe's metadata based on Sequence and Strand
+guiseppe_updated_MMR_sgRNA_metadata_FILTERED <- guiseppe_updated_MMR_sgRNA_metadata %>%
+    semi_join(BE4max_stouffer_data, by = c("sgRNA.sequence" = "Sequence", "sgRNA.Strand")) %>%
+    distinct()
+
+# 3. Warning Logic: Find sequences that matched by Seq but were excluded because of Strand
+guiseppe_mismatch_seqs <- setdiff(
+    guiseppe_updated_MMR_sgRNA_metadata$sgRNA.sequence[guiseppe_seq_matches],
+    guiseppe_updated_MMR_sgRNA_metadata_FILTERED$sgRNA.sequence
+)
+
+if (length(guiseppe_mismatch_seqs) > 0) {
+    for (seq in guiseppe_mismatch_seqs) {
+        gui_row <- guiseppe_updated_MMR_sgRNA_metadata[guiseppe_updated_MMR_sgRNA_metadata$sgRNA.sequence == seq, ][1, ]
+        be4_row <- BE4max_stouffer_data[BE4max_stouffer_data$Sequence == seq, ][1, ]
+
+        if (!identical(gui_row$sgRNA.Strand, be4_row$sgRNA.Strand)) {
+            message(paste0("WARNING (Giuseppe): Mismatch for sgRNA: ", seq, ". Issue(s): sgRNA.Strand"))
+        }
+    }
+}
+
+print(paste("Created guiseppe_updated_MMR_sgRNA_metadata_FILTERED with", nrow(guiseppe_updated_MMR_sgRNA_metadata_FILTERED), "distinct rows."))
+
+# Verify that all sgRNA sequences match between the two filtered dataframes
+as_seqs <- unique(AS_MSH2_MSH6_guides_FILTERED$sgRNA.sequence)
+gui_seqs <- unique(guiseppe_updated_MMR_sgRNA_metadata_FILTERED$sgRNA.sequence)
+
+missing_in_gui <- setdiff(as_seqs, gui_seqs)
+missing_in_as <- setdiff(gui_seqs, as_seqs)
+
+if (length(missing_in_gui) > 0) {
+    for (seq in missing_in_gui) {
+        message(paste0("WARNING: sgRNA ", seq, " is in AS_MSH2_MSH6_guides_FILTERED but NOT in guiseppe_updated_MMR_sgRNA_metadata_FILTERED"))
+    }
+}
+
+if (length(missing_in_as) > 0) {
+    for (seq in missing_in_as) {
+        message(paste0("WARNING: sgRNA ", seq, " is in guiseppe_updated_MMR_sgRNA_metadata_FILTERED but NOT in AS_MSH2_MSH6_guides_FILTERED"))
+    }
+}
+
+if (length(missing_in_gui) == 0 && length(missing_in_as) == 0) {
+    print("Verification Successful: All sgRNA sequences match between AS and Giuseppe filtered dataframes.")
+}
+
+# Detailed cross-check for specific metadata columns
+cols_to_compare <- c(
+    "Gene.Symbol", "Ensembl.Gene.ID", "Ensembl.transcript.ID", "Gene.strand",
+    "Genome.assembly", "Transcript.reference.allele", "Transcript.alternate.allele",
+    "Genome.reference.allele", "Genome.alternate.allele", "Chromosome",
+    "sgrna.genomic.position", "sgRNA.Strand", "Edit"
+)
+
+all_metadata_match <- TRUE
+for (seq in as_seqs) {
+    as_row <- AS_MSH2_MSH6_guides_FILTERED[AS_MSH2_MSH6_guides_FILTERED$sgRNA.sequence == seq, ][1, ]
+    gui_row <- guiseppe_updated_MMR_sgRNA_metadata_FILTERED[guiseppe_updated_MMR_sgRNA_metadata_FILTERED$sgRNA.sequence == seq, ][1, ]
+
+    mismatches <- c()
+    for (col in cols_to_compare) {
+        if (!identical(as_row[[col]], gui_row[[col]])) {
+            mismatches <- c(mismatches, col)
+        }
+    }
+
+    if (length(mismatches) > 0) {
+        all_metadata_match <- FALSE
+        message(paste0("WARNING: Metadata mismatch for sgRNA ", seq, ". Column(s): ", paste(mismatches, collapse = ", ")))
+    }
+}
+
+if (all_metadata_match) {
+    print("Verification Successful: All specified columns match perfectly between AS and Giuseppe filtered dataframes for all 164 sgRNAs.")
+}
+
+# Drop BsmBI.flag and 4T.flag columns
+guiseppe_updated_MMR_sgRNA_metadata_FILTERED <- guiseppe_updated_MMR_sgRNA_metadata_FILTERED %>%
+    select(-BsmBI.flag, -`4T.flag`)
+
+AS_MSH2_MSH6_guides_FILTERED <- AS_MSH2_MSH6_guides_FILTERED %>%
+    select(-BsmBI.flag, -`4T.flag`)
+
+print("Dropped BsmBI.flag and 4T.flag columns from filtered dataframes.")
+
+# Rename columns in Giuseppe's metadata with G_new_ prefix
+cols_to_rename <- c(
+    "#.edits", "#silent.edits", "Nucleotide.edits",
+    "Amino.acid.edits", "Mutation.category", "Clinical.significance",
+    "PAM", "sgRNA.context.sequence"
+)
+
+guiseppe_updated_MMR_sgRNA_metadata_FILTERED <- guiseppe_updated_MMR_sgRNA_metadata_FILTERED %>%
+    rename_with(~ paste0("G_new_", .), all_of(cols_to_rename))
+
+# Rename columns in AS metadata with AS_new_ prefix
+as_cols_to_rename <- c(
+    "#.edits", "#silent.edits", "Nucleotide.edits",
+    "Amino.acid.edits", "Mutation.category", "Clinical.significance",
+    "PAM", "sgRNA.context.sequence"
+)
+
+AS_MSH2_MSH6_guides_FILTERED <- AS_MSH2_MSH6_guides_FILTERED %>%
+    rename_with(~ paste0("AS_new_", .), all_of(as_cols_to_rename))
+
+print("Prefixed Giuseppe's metadata columns with G_new_ and AS metadata columns with AS_new_.")
+
+# Verify Amino acid edits match between the two filtered dataframes
+all_aa_match <- TRUE
+for (seq in as_seqs) {
+    as_row <- AS_MSH2_MSH6_guides_FILTERED[AS_MSH2_MSH6_guides_FILTERED$sgRNA.sequence == seq, ][1, ]
+    gui_row <- guiseppe_updated_MMR_sgRNA_metadata_FILTERED[guiseppe_updated_MMR_sgRNA_metadata_FILTERED$sgRNA.sequence == seq, ][1, ]
+
+    if (!identical(as_row$AS_new_Amino.acid.edits, gui_row$G_new_Amino.acid.edits)) {
+        all_aa_match <- FALSE
+        message(paste0("WARNING: Amino acid edits mismatch for sgRNA ", seq, ": AS says '", as_row$AS_new_Amino.acid.edits, "', Giuseppe says '", gui_row$G_new_Amino.acid.edits, "'"))
+    }
+}
+
+if (all_aa_match) {
+    print("Verification Successful: All Amino acid edits match perfectly between AS and Giuseppe filtered dataframes.")
+}
+
+# Merge the two verified dataframes
+join_cols <- c("sgRNA.sequence", cols_to_compare)
+
+combined_RERUN_AS_G_MSH2_6_sgRNA_metadata <- AS_MSH2_MSH6_guides_FILTERED %>%
+    inner_join(guiseppe_updated_MMR_sgRNA_metadata_FILTERED, by = join_cols)
+
+# Reorder columns to put AS and Giuseppe versions next to each other
+combined_RERUN_AS_G_MSH2_6_sgRNA_metadata <- combined_RERUN_AS_G_MSH2_6_sgRNA_metadata %>%
+    select(
+        sgRNA.sequence, Gene.Symbol, Ensembl.Gene.ID, Ensembl.transcript.ID,
+        Gene.strand, Genome.assembly, Transcript.reference.allele,
+        Transcript.alternate.allele, Genome.reference.allele,
+        Genome.alternate.allele, Chromosome, sgrna.genomic.position,
+        sgRNA.Strand, Edit,
+        AS_new_sgRNA.context.sequence, G_new_sgRNA.context.sequence,
+        AS_new_PAM, G_new_PAM,
+        `AS_new_#.edits`, `G_new_#.edits`,
+        `AS_new_#silent.edits`, `G_new_#silent.edits`,
+        AS_new_Nucleotide.edits, G_new_Nucleotide.edits,
+        AS_new_Amino.acid.edits, G_new_Amino.acid.edits,
+        AS_new_Mutation.category, G_new_Mutation.category,
+        AS_new_Clinical.significance, G_new_Clinical.significance
+    )
+
+print(paste("Created combined_RERUN_AS_G_MSH2_6_sgRNA_metadata and reordered columns. Rows:", nrow(combined_RERUN_AS_G_MSH2_6_sgRNA_metadata)))
+
+# Combine BE4max Stouffer's data with verified rerun metadata
+clinvar_annotated_BE4max_stouffer_data <- BE4max_stouffer_data %>%
+    left_join(combined_RERUN_AS_G_MSH2_6_sgRNA_metadata,
+        by = c("Sequence" = "sgRNA.sequence", "sgRNA.Strand")
+    )
+
+print(paste("Created clinvar_annotated_BE4max_stouffer_data with", nrow(clinvar_annotated_BE4max_stouffer_data), "rows."))
+
+# Filter for significant hits only
+sig_hits_clinvar_annotated_BE4max_stouffer_data <- clinvar_annotated_BE4max_stouffer_data %>%
+    filter(is_significant == TRUE)
+
+print(paste("Filtered to", nrow(sig_hits_clinvar_annotated_BE4max_stouffer_data), "significant hits."))
+
+# Create gene-specific significant hit dataframes
+# MSH2
+MSH2_sig_hits_clinvar_annotated_BE4max_stouffer_data <- sig_hits_clinvar_annotated_BE4max_stouffer_data %>%
+    filter(grepl("MSH2_exons", sgRNA) | Gene.Symbol == "MSH2") %>%
+    # Drop redundant column
+    select(-any_of("Amino.acid.edits"))
+
+# MSH6
+MSH6_sig_hits_clinvar_annotated_BE4max_stouffer_data <- sig_hits_clinvar_annotated_BE4max_stouffer_data %>%
+    filter(grepl("MSH6_exons", sgRNA) | Gene.Symbol == "MSH6")
+
+print(paste("Created MSH2 sig hits with", nrow(MSH2_sig_hits_clinvar_annotated_BE4max_stouffer_data), "rows."))
+print(paste("Created MSH6 sig hits with", nrow(MSH6_sig_hits_clinvar_annotated_BE4max_stouffer_data), "rows."))
+
+# Export MSH6 sig hits to target_guides.txt
+export_dir <- "./outputs_mutation_plots/fix_clinvar_alignment"
+if (!dir.exists(export_dir)) dir.create(export_dir, recursive = TRUE)
+
+write.table(
+    MSH6_sig_hits_clinvar_annotated_BE4max_stouffer_data %>%
+        select(
+            sgRNA.sequence = Sequence,
+            Amino.acid.edits = AS_new_Amino.acid.edits
+        ),
+    file = file.path(export_dir, "target_guides.txt"),
+    sep = "\t", row.names = FALSE, quote = FALSE
+)
+
+print(paste("Saved filtered MSH6 sig hits to", file.path(export_dir, "target_guides.txt")))
+```
+
+Need to run /Users/annaschoonen/Documents/JMF_lab_project/figures_for_paper/guiseppe_reran_sgRNA_design_MSH2_MSH6_exons_4_14_26/AS_rerun_base_editor_design_tool_myself/fix_clinvar_alignment/realign_clinvar.py on the target_guides.txt 
+file to correct the order of the clinical significance and the mutation category type to match the order the mutations appear in the amino acid edits column so that we can parse the data for each mutation
+
+```{r}
+# Load corrected clinvar mapping
+corrected_clinvar_mapping <- read.csv("../../data/mutation_analysis/corrected_clinvar_mapping.csv", check.names = FALSE)
+
+print(paste("Loaded corrected clinvar mapping with", nrow(corrected_clinvar_mapping), "rows."))
+
+# Merge corrected clinvar mapping back into MSH6 Hits
+corrected_clinvar_MSH6_sig_hits_BE4max_stouffer_data <- MSH6_sig_hits_clinvar_annotated_BE4max_stouffer_data %>%
+    # Trim trailing semicolon and whitespace to match CSV format
+    mutate(AS_new_Amino.acid.edits_clean = gsub(";$", "", trimws(AS_new_Amino.acid.edits))) %>%
+    left_join(corrected_clinvar_mapping,
+        by = c("AS_new_Amino.acid.edits_clean" = "Amino_Acid_Edits", "Sequence")
+    ) %>%
+    select(-AS_new_Amino.acid.edits_clean) %>%
+    # Drop redundant column
+    select(-any_of("Amino.acid.edits"))
+
+print(paste("Created corrected_clinvar_MSH6_sig_hits_BE4max_stouffer_data with", nrow(corrected_clinvar_MSH6_sig_hits_BE4max_stouffer_data), "rows."))
+
+# Export to supplemental folder
+supp_dir <- "./outputs_mutation_plots/MSH6/supplemental/"
+if (!dir.exists(supp_dir)) dir.create(supp_dir, recursive = TRUE)
+
+write_csv(
+    corrected_clinvar_MSH6_sig_hits_BE4max_stouffer_data,
+    file.path(supp_dir, "corrected_clinvar_MSH6_sig_hits_BE4max_stouffer_data.csv")
+)
+
+# Expand concatenated edits into individual rows for MSH6
+# Focus on aligned columns and drop problematic original category/significance fields
+
+problematic_cols <- c(
+    "AS_new_Clinical.significance", "G_new_Clinical.significance"
+)
+
+cols_to_split <- c(
+    "AS_new_Nucleotide.edits", "AS_new_Amino.acid.edits",
+    "G_new_Nucleotide.edits", "G_new_Amino.acid.edits",
+    "AS_new_Mutation.category", "G_new_Mutation.category",
+    "Corrected_Clinical_Significance", "Corrected_Mutation_Category"
+)
+
+corrected_clinvar_MSH6_sig_hits_EXPANDED <- corrected_clinvar_MSH6_sig_hits_BE4max_stouffer_data %>%
+    # 1. Drop problematic originals
+    select(-any_of(problematic_cols)) %>%
+    # 2. Trim trailing ";" and whitespace from aligned columns
+    mutate(across(any_of(cols_to_split), ~ gsub(";$", "", trimws(.x)))) %>%
+    # 3. Split into new rows based on ";"
+    tidyr::separate_rows(any_of(cols_to_split), sep = ";")
+
+print(paste("Expanded MSH6 data to", nrow(corrected_clinvar_MSH6_sig_hits_EXPANDED), "tidy rows."))
+
+# Export expanded version to supplemental folder
+write_csv(
+    corrected_clinvar_MSH6_sig_hits_EXPANDED,
+    file.path(supp_dir, "corrected_clinvar_MSH6_sig_hits_EXPANDED.csv")
+)
+```
+
+## MSH6 Mutation Lollipop Plot (Exon 4)
+We need to plot this region :
+# 2. Prepare SNP Data from Significant Hits (Exon 4 range: 210-1057)
+plot_range_start <- 210
+plot_range_end <- 1057
+```{r msh6_lollipop, fig.height=6, fig.width=12}
+library(trackViewer)
+library(GenomicRanges)
+library(httr)
+
+# 1. Fetch MSH6 Protein Features via EMBL-EBI Proteins REST API
+# Canonical ID: P52701
+API_URL <- "https://www.ebi.ac.uk/proteins/api/features"
+accession <- "P52701"
+
+message("Fetching DOMAINS_AND_SITES for MSH6 (P52701) from EBI API...")
+response <- GET(paste0(API_URL, "?accession=", accession))
+
+if (!http_error(response)) {
+    content <- httr::content(response)[[1]]
+    # 2. Convert the COMPLETE nested API response into a flat tidy DataFrame
+    # No filters applied - we want to see everything UniProt has for this protein
+    features_list <- if (is.null(content$features)) list() else content$features
+
+    EBI_msh6_features_df <- lapply(features_list, function(x) {
+        data.frame(
+            type = if (is.null(x$type)) "UNKNOWN" else x$type,
+            category = if (is.null(x$category)) "GENERAL" else x$category,
+            description = if (is.null(x$description)) NA else x$description,
+            start = as.numeric(if (is.null(x$begin)) NA else x$begin),
+            end = as.numeric(if (is.null(x$end)) NA else x$end),
+            stringsAsFactors = FALSE
+        )
+    }) %>%
+        bind_rows()
+
+    # 3. Display the result
+    if (nrow(EBI_msh6_features_df) > 0) {
+        EBI_msh6_features_df <- EBI_msh6_features_df %>%
+            mutate(accession = accession) %>%
+            select(accession, type, category, description, start, end) %>%
+            filter(type %in% c("REGION", "CHAIN")) %>%
+            arrange(start)
+
+        print(paste("Successfully fetched and filtered", nrow(EBI_msh6_features_df), "key features for MSH6."))
+        print(EBI_msh6_features_df)
+
+        # Prepare for merging with InterPro data
+        to_merge_EBI_msh6_features_df <- EBI_msh6_features_df %>%
+            mutate(Source_Database = "EBI") %>%
+            dplyr::rename(Protein_Accession = accession, Type = type) %>%
+            mutate(Short_Name = case_when(
+                Type == "CHAIN" ~ Type,
+                Type == "REGION" ~ description,
+                TRUE ~ Type
+            ))
+    } else {
+        message("Warning: EBI API returned zero features for this accession.")
+    }
+} else {
+    stop("Failed to fetch features from EBI API. Check internet connection.")
+}
+```
+
+
+## MSH6 InterPro Domain Data
+Note: This data was pulled from [InterPro MSH6 P52701 - this is the cononical isoform] (https://www.ebi.ac.uk/interpro/protein/UniProt/P52701/?isoform=P52701-1) 
+and I accessed on 4/19/2026.
+
+```{r load_interpro}
+library(readr)
+library(dplyr)
+
+interpro_path <- "../../data/mutation_analysis/canonical_MSH6_domains_InterPro_4_19_25_P52701.tsv"
+
+# Load InterPro data
+MSH6_InterPro_raw_df <- read_tsv(interpro_path)
+
+# Clean column names (replace spaces with underscores)
+colnames(MSH6_InterPro_raw_df) <- gsub(" ", "_", colnames(MSH6_InterPro_raw_df))
+
+library(tidyr)
+# Filter for Pfam entries only
+MSH6_Pfam_df <- MSH6_InterPro_raw_df %>%
+    filter(Source_Database == "pfam") %>%
+    # Separate rows where Matches has multiple entries (e.g., "739..931,1025..1064")
+    separate_rows(Matches, sep = ",") %>%
+    # Split the "739..931" format into separate numeric start and end columns
+    separate(Matches, into = c("start", "end"), sep = "\\.\\.", convert = TRUE)
+
+# Initial inspection of the InterPro data
+print(paste("Successfully loaded InterPro data with", nrow(MSH6_InterPro_raw_df), "records."))
+print(paste("Found", nrow(MSH6_Pfam_df), "Pfam-specific domain segments after tidy expansion."))
+print(MSH6_Pfam_df)
+```
+
+## Combined MSH6 Feature Dataset
+Merging the EBI API features and the InterPro Pfam domains into a single master table.
+
+```{r merge_features}
+# Combine the datasets and normalize accession casing
+combined_msh6_features_df <- bind_rows(to_merge_EBI_msh6_features_df, MSH6_Pfam_df) %>%
+    mutate(Protein_Accession = toupper(Protein_Accession))
+
+# Inspection of the combined data
+print(paste("Created combined dataset with", nrow(combined_msh6_features_df), "total features."))
+print(head(combined_msh6_features_df, 20))
+
+# Optional: Checking for overlapping columns and counts
+table(combined_msh6_features_df$Source_Database)
+
+# Save as CSV for supplemental documentation
+output_path <- "./outputs_mutation_plots/MSH6/supplemental/Supplemental_table_combined_msh6_protein_features_EBI_InterPro.csv"
+
+# Ensure the directory exists
+dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
+
+# Write the CSV
+library(readr)
+write_csv(combined_msh6_features_df, output_path)
+
+print(paste("Combined dataset exported successfully to:", output_path))
+```
+
+## MSH6 Exon 4 Mutation Lollipop Plot
+Final visualization of significant hits mapped against EBI and InterPro protein features.
+We are plotting BE4max hits for MSH6 exon 4 hits here as that is the exon with most of our hits
+this gets set by ranges = GRanges("P52701", IRanges(210, 1057)), 
+according to UCSC genome browser the first amino acid of exon 4 is 210 and the last amino acid is 1057 for the MANE select transcript
+```{r msh6_final_plot, fig.height=8, fig.width=14}
+library(trackViewer)
+library(GenomicRanges)
+library(RColorBrewer)
+
+# 1. Prepare Feature GRanges (Protein Domains)
+# Define color and height mapping
+# Changed CHAIN to black as requested by user
+domain_colors <- c(
+    "CHAIN"      = "black",
+    "Disordered" = "#FFD92F",
+    "MutS_V"     = "#B3B3B3",
+    "PWWP"       = "#bebada",
+    "MutS_I"     = "#66C2A5",
+    "MutS_II"    = "#E78AC3",
+    "MutS_IV"    = "#8DA0CB",
+    "MutS_III"   = "#A6D854"
+)
+
+MSH6_features_gr <- GRanges(
+    seqnames = combined_msh6_features_df$Protein_Accession,
+    ranges = IRanges(
+        start = combined_msh6_features_df$start,
+        end = combined_msh6_features_df$end
+    ),
+    fill = domain_colors[combined_msh6_features_df$Short_Name],
+    height = ifelse(combined_msh6_features_df$Short_Name == "CHAIN", 0.02, 0.09),
+    label = combined_msh6_features_df$Short_Name
+)
+
+# Set the names for plot labels
+names(MSH6_features_gr) <- MSH6_features_gr$label
+
+# 2. Prepare SNP GRanges (Mutations)
+# Extract numeric position from the amino acid edit string (e.g., "p.Ser348Phe" -> 348)
+msh6_snps_df <- corrected_clinvar_MSH6_sig_hits_EXPANDED %>%
+    mutate(pos = as.numeric(gsub("[^0-9]", "", AS_new_Amino.acid.edits))) %>%
+    filter(!is.na(pos))
+
+# Export finalized plot data for auditing
+write_csv(msh6_snps_df, file.path(supp_dir, "msh6_snps_df_for_final_audit.csv"))
+
+# Create and export a clean Supplementary Table with a subset of columns
+supp_table_cols <- c(
+    "GuideID", "guide_type", "df_name", "genomic_start", "genomic_end",
+    "Sequence", "sgRNA", "sgRNA.Strand", "is_significant",
+    "Gene.Symbol", "Ensembl.Gene.ID", "Ensembl.transcript.ID", "Gene.strand",
+    "Genome.assembly", "Transcript.reference.allele", "Transcript.alternate.allele",
+    "Genome.reference.allele", "Genome.alternate.allele", "Chromosome",
+    "sgrna.genomic.position", "Edit", "AS_new_sgRNA.context.sequence",
+    "AS_new_PAM", "AS_new_#.edits", "AS_new_#silent.edits",
+    "AS_new_Nucleotide.edits", "AS_new_Amino.acid.edits",
+    "Corrected_Clinical_Significance", "Corrected_Mutation_Category", 
+    "pos"
+)
+
+write_csv(
+    msh6_snps_df %>% dplyr::select(any_of(supp_table_cols)),
+    file.path(supp_dir, "Supplementary_table_final_msh6_snps_df_final_plot_data.csv")
+)
+
+MSH6_snps_gr <- GRanges(
+    seqnames = "P52701",
+    ranges = IRanges(start = msh6_snps_df$pos, width = 1),
+    label = msh6_snps_df$AS_new_Amino.acid.edits,
+    score = 1 # Uniform height for the sticks
+)
+
+# Crucial: Assign names to the GRanges object so lolliplot displays the labels
+names(MSH6_snps_gr) <- MSH6_snps_gr$label
+
+# Map clinical significance to specific colors requested by the user
+MSH6_snps_gr$color <- case_when(
+    msh6_snps_df$Corrected_Clinical_Significance == "Pathogenic" ~ "#e41a1c", # Red
+    msh6_snps_df$Corrected_Clinical_Significance == "Pathogenic/Likely pathogenic" ~ "#fd8d3c", # Orange
+    msh6_snps_df$Corrected_Clinical_Significance == "Conflicting classifications of pathogenicity" ~ "#28D0FF", # Blue
+    msh6_snps_df$Corrected_Clinical_Significance == "Uncertain significance" ~ "#BF3EFF", # New Purple
+    grepl("Benign", msh6_snps_df$Corrected_Clinical_Significance, ignore.case = TRUE) ~ "#238B45", # Deeper Green
+    msh6_snps_df$Corrected_Clinical_Significance == "None" ~ "#808080", # Medium Grey
+    TRUE ~ "#999999" # Default Grey
+)
+
+# Map category to shapes
+MSH6_snps_gr$shape <- case_when(
+    grepl("Missense", msh6_snps_df$Corrected_Mutation_Category, ignore.case = TRUE) ~ "circle",
+    grepl("Nonsense", msh6_snps_df$Corrected_Mutation_Category, ignore.case = TRUE) ~ "square",
+    grepl("Silent", msh6_snps_df$Corrected_Mutation_Category, ignore.case = TRUE) ~ "triangle",
+    TRUE ~ "diamond"
+)
+
+# 3. Final Plotting Configuration
+# Set vertical labels and staggering for mutations
+MSH6_snps_gr$label.parameter.rot <- 90
+# Hard-coding to exactly 7pt font for the grid-based labels
+MSH6_snps_gr$label.parameter.gp <- list(fontsize = 7)
+# Increase score to 1.5 to make lollipops taller and fill vertical space
+score(MSH6_snps_gr) <- 1.5
+# Suppress redundant horizontal labels on the circles
+MSH6_snps_gr$node.label <- NA
+MSH6_snps_gr$label <- NA
+
+# Protein Feature labels (on the backbone) - Set to exactly 7pt font
+MSH6_features_gr$label.parameter.gp <- list(fontsize = 7)
+
+# Generate the plot
+lolliplot(MSH6_snps_gr, MSH6_features_gr,
+    ranges = GRanges("P52701", IRanges(210, 1057)),
+    ylab = "MSH6 Exon 4 BE Hits",
+    yaxis = FALSE,
+    # Custom X-axis ticks to show start/end of Exon 4
+    xaxis = c(210, 400, 600, 800, 1000, 1057),
+    # Using xaxis.gp and ylab.gp to force EXACT point sizes (required for grid graphics)
+    xaxis.gp = gpar(fontsize = 7),
+    ylab.gp = gpar(fontsize = 8),
+    legendPosition = list(position = "right", width = unit(0.8, "inch"))
+)
+
+# Add CUSTOM legends using 'grid'
+library(grid)
+
+# --- SIDE LEGENDS (ClinVar / Mutation Category) ---
+# Shifted to x=0.9 to provide slightly more space after the plot ends
+pushViewport(viewport(x = 0.90, y = 0, width = 0.20, height = 1.0, just = c("center", "bottom")))
+
+grid.text("ClinVar Annotations", x = 0.05, y = 0.9, just = "left", gp = gpar(fontface = "bold", cex = 0.7))
+
+cv_labels <- c("Pathogenic", "Pathogenic/Likely\npathogenic", "Conflicting", "Uncertain significance", "Benign/Likely benign", "Not reported")
+cv_colors <- c("#e41a1c", "#fd8d3c", "#28D0FF", "#BF3EFF", "#238B45", "#808080")
+
+# Smart decrementing y-position
+y_curr <- 0.9
+for (i in seq_along(cv_labels)) {
+    # Add extra padding BEFORE if this entry is multiline
+    if (grepl("\n", cv_labels[i])) {
+        y_curr <- y_curr - 0.02
+    }
+
+    y_curr <- y_curr - 0.075 # Standard increment
+
+    grid.points(x = unit(0.1, "npc"), y = unit(y_curr, "npc"), pch = 21, gp = gpar(col = cv_colors[i], fill = cv_colors[i], cex = 0.5))
+    grid.text(cv_labels[i], x = unit(0.2, "npc"), y = unit(y_curr, "npc"), just = "left", gp = gpar(fontsize = 7, lineheight = 0.8))
+
+    # Add extra padding AFTER if this entry was multiline to prevent squishing the next item
+    if (grepl("\n", cv_labels[i])) {
+        y_curr <- y_curr - 0.03
+    }
+}
+
+y_sec2_start <- y_curr - 0.08
+grid.text("Mutation Category", x = 0.05, y = y_sec2_start, just = "left", gp = gpar(fontface = "bold", cex = 0.7))
+
+mut_labels <- c("Missense (Circle)", "Nonsense (Square)")
+mut_pchs <- c(16, 15)
+
+for (j in seq_along(mut_labels)) {
+    y_sec2_start <- y_sec2_start - 0.07
+    grid.points(x = unit(0.1, "npc"), y = unit(y_sec2_start, "npc"), pch = mut_pchs[j], gp = gpar(col = "black", cex = 0.5))
+    grid.text(mut_labels[j], x = unit(0.2, "npc"), y = unit(y_sec2_start, "npc"), just = "left", gp = gpar(fontsize = 7))
+}
+popViewport()
+```
+
+
+```{r export_final_msh6_plot}
+# 4. Final Figure Export (6.4 x 2 inches)
+# ----------------------------------------
+output_dir <- "./outputs_mutation_plots/MSH6/main_figs/"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+# Define file names
+pdf_out <- paste0(output_dir, "MSH6_mutation_lollipop_Exon4_main_fig.pdf")
+png_out <- paste0(output_dir, "MSH6_mutation_lollipop_Exon4_main_fig.png")
+
+# Wrapper function for the plotting logic to ensure identical outputs
+plot_msh6_final <- function() {
+    # 1. Main Lolliplot
+    lolliplot(MSH6_snps_gr, MSH6_features_gr,
+        ranges = GRanges("P52701", IRanges(210, 1057)),
+        ylab = "MSH6 Exon 4 BE Hits",
+        yaxis = FALSE,
+        xaxis = c(210, 400, 600, 800, 1000, 1057),
+        # Forcing EXACT point sizes for Illustrator
+        xaxis.gp = gpar(fontsize = 7),
+        ylab.gp = gpar(fontsize = 8),
+        legendPosition = list(position = "right", width = unit(0.8, "inch"))
+    )
+
+    # 2. Add CUSTOM legends using 'grid'
+    library(grid)
+
+    # --- SIDE LEGENDS (ClinVar / Mutation Category) ---
+    # Shifted to x=0.9 to provide slightly more space after the plot ends
+    pushViewport(viewport(x = 0.90, y = 0, width = 0.20, height = 1.0, just = c("center", "bottom")))
+    grid.text("ClinVar Annotations", x = 0.05, y = 0.9, just = "left", gp = gpar(fontface = "bold", cex = 0.7))
+    cv_labels <- c("Pathogenic", "Pathogenic/Likely\npathogenic", "Conflicting", "Uncertain significance", "Benign/Likely benign", "Not reported")
+    cv_colors <- c("#e41a1c", "#fd8d3c", "#28D0FF", "#BF3EFF", "#238B45", "#808080")
+
+    y_curr <- 0.9
+    for (i in seq_along(cv_labels)) {
+        # Add padding BEFORE multiline
+        if (grepl("\n", cv_labels[i])) {
+            y_curr <- y_curr - 0.02
+        }
+
+        y_curr <- y_curr - 0.075
+        grid.points(x = unit(0.1, "npc"), y = unit(y_curr, "npc"), pch = 21, gp = gpar(col = cv_colors[i], fill = cv_colors[i], cex = 0.5))
+        grid.text(cv_labels[i], x = unit(0.2, "npc"), y = unit(y_curr, "npc"), just = "left", gp = gpar(fontsize = 7, lineheight = 0.8))
+
+        # Add padding AFTER multiline
+        if (grepl("\n", cv_labels[i])) {
+            y_curr <- y_curr - 0.03
+        }
+    }
+
+    y_sec2_start <- y_curr - 0.08
+    grid.text("Mutation Category", x = 0.05, y = y_sec2_start, just = "left", gp = gpar(fontface = "bold", cex = 0.7))
+    mut_labels <- c("Missense (Circle)", "Nonsense (Square)")
+    mut_pchs <- c(16, 15)
+    for (j in seq_along(mut_labels)) {
+        y_sec2_start <- y_sec2_start - 0.07
+        grid.points(x = unit(0.1, "npc"), y = unit(y_sec2_start, "npc"), pch = mut_pchs[j], gp = gpar(col = "black", cex = 0.5))
+        grid.text(mut_labels[j], x = unit(0.2, "npc"), y = unit(y_sec2_start, "npc"), just = "left", gp = gpar(fontsize = 7))
+    }
+    popViewport()
+}
+
+# SAVE TO PDF
+message("Exporting PDF: ", pdf_out)
+pdf(pdf_out, width = 6.4, height = 2)
+plot_msh6_final()
+dev.off()
+
+# SAVE TO PNG (Ultra-High Resolution)
+message("Exporting PNG: ", png_out)
+png(png_out, width = 6.4, height = 2, units = "in", res = 600)
+plot_msh6_final()
+dev.off()
+
+print("Final Figures Exported Successfully.")
+```
+
+
+------------------------------
+
+## MSH2 Mutation Lollipop Plot (Exon 16)
+Now plotting MSH2 exon 16 hit - there is only one hit for this exon so it is much more straight forward to plot. 
+According to UCSC genome broswer for the MANE select transcript, exon 16 starts at amino acid 879 and ends at amino acid 935
+We did get other hits in the UTR that immediately follows exon 16, however those in the UTR do not code for amino acids and
+therefore are not plotted here.
+
+```{r msh2_features}
+library(trackViewer)
+library(GenomicRanges)
+library(httr)
+
+# 1. Fetch MSH2 Protein Features via EBI API
+# Primary Accession: P43246
+accession_msh2 <- "P43246"
+API_URL <- "https://www.ebi.ac.uk/proteins/api/features"
+
+message("Fetching features for MSH2 (P43246)...")
+response_msh2 <- GET(paste0(API_URL, "?accession=", accession_msh2))
+
+if (!http_error(response_msh2)) {
+    content_msh2 <- httr::content(response_msh2)[[1]]
+    features_list_msh2 <- if (is.null(content_msh2$features)) list() else content_msh2$features
+
+    EBI_msh2_features_df <- lapply(features_list_msh2, function(x) {
+        data.frame(
+            accession = accession_msh2,
+            type = if (is.null(x$type)) "UNKNOWN" else x$type,
+            category = if (is.null(x$category)) "GENERAL" else x$category,
+            description = if (is.null(x$description)) NA else x$description,
+            start = as.numeric(if (is.null(x$begin)) NA else x$begin),
+            end = as.numeric(if (is.null(x$end)) NA else x$end),
+            stringsAsFactors = FALSE
+        )
+    }) %>% bind_rows()
+
+    # Filter to keep only the backbone (CHAIN) for now to test the error source
+    EBI_msh2_features_df <- EBI_msh2_features_df %>%
+        filter(type == "CHAIN") %>%
+        mutate(Source_Database = "EBI") %>%
+        dplyr::rename(Protein_Accession = accession, Type = type) %>%
+        mutate(Short_Name = ifelse(Type == "CHAIN", "CHAIN", description)) %>%
+        # Normalize casing for match consistency
+        mutate(Protein_Accession = toupper(Protein_Accession))
+
+    print(paste("Successfully fetched", nrow(EBI_msh2_features_df), "features for MSH2."))
+} else {
+    stop("Failed to fetch features from EBI API.")
+}
+```
+
+```{r msh2_data_prep}
+# 2. Prepare SNP Data for MSH2 Exon 16
+# Define the range identified by the user
+msh2_exon16_start <- 879
+msh2_exon16_end <- 935
+```
+
+```{r msh2_validation_check}
+# Isolated check for the Exon 16 guide metadata consistency
+msh2_validation_row <- MSH2_sig_hits_clinvar_annotated_BE4max_stouffer_data %>%
+    filter(GuideID == "hits_for_FACS_followup_327")
+
+if (nrow(msh2_validation_row) == 1) {
+    # Define column pairs for comparison (AS_new vs G_new)
+    comparison_pairs <- list(
+        c("AS_new_#.edits", "G_new_#.edits"),
+        c("AS_new_#silent.edits", "G_new_#silent.edits"),
+        c("AS_new_Nucleotide.edits", "G_new_Nucleotide.edits"),
+        c("AS_new_Amino.acid.edits", "G_new_Amino.acid.edits"),
+        c("AS_new_Mutation.category", "G_new_Mutation.category"),
+        c("AS_new_Clinical.significance", "G_new_Clinical.significance")
+    )
+
+    message("Verifying metadata consistency for guide: hits_for_FACS_followup_327...")
+
+    for (pair in comparison_pairs) {
+        as_val <- msh2_validation_row[[pair[1]]]
+        g_val <- msh2_validation_row[[pair[2]]]
+
+        if (!identical(as_val, g_val)) {
+            warning(paste0(
+                "METADATA MISMATCH for ", pair[1], " and ", pair[2], "!\n",
+                "  AS_new says: '", as_val, "'\n",
+                "  G_new says: '", g_val, "'"
+            ))
+        } else {
+            print(paste0("OK: ", pair[1], " matches ", pair[2]))
+        }
+    }
+} else if (nrow(msh2_validation_row) == 0) {
+    message("Warning: GuideID 'hits_for_FACS_followup_327' not found in MSH2 hits.")
+}
+```
+
+
+
+```{r msh2_process_hits}
+# Process the significant hits - focused on the Exon 16 region
+msh2_snps_df <- MSH2_sig_hits_clinvar_annotated_BE4max_stouffer_data %>%
+    # 1. Strip trailing semicolons and whitespace from key columns to ensure clean labels/mapping
+    mutate(across(
+        c(AS_new_Amino.acid.edits, AS_new_Mutation.category, AS_new_Clinical.significance),
+        ~ gsub(";$", "", trimws(.x))
+    )) %>%
+    # 2. Calculate position from the amino acid edit string
+    mutate(pos = as.numeric(gsub("[^0-9]", "", AS_new_Amino.acid.edits))) %>%
+    # 3. Filter for the hit in Exon 16
+    filter(pos >= msh2_exon16_start & pos <= msh2_exon16_end)
+
+print(paste("Identified", nrow(msh2_snps_df), "significant hit(s) in MSH2 Exon 16."))
+print(msh2_snps_df %>% select(sgRNA, AS_new_Amino.acid.edits, pos, AS_new_Clinical.significance))
+```
+
+
+Note for MSH2 domain data I downloaded it from InterPro (https://www.ebi.ac.uk/interpro/protein/UniProt/P43246/?isoform=P43246-1)
+on 4/20/26 for the canonical isoform P43246-1
+
+```{r msh2_interpro_and_plot, fig.height=8, fig.width=14}
+# 3. Load MSH2 InterPro Data
+msh2_interpro_path <- "../../data/mutation_analysis/InterPro_MSH2_canonical_domains_4_21_26_download_P43246.tsv"
+
+MSH2_InterPro_raw_df <- read_tsv(msh2_interpro_path)
+colnames(MSH2_InterPro_raw_df) <- gsub(" ", "_", colnames(MSH2_InterPro_raw_df))
+
+MSH2_Pfam_df <- MSH2_InterPro_raw_df %>%
+    filter(Source_Database == "pfam") %>%
+    separate_rows(Matches, sep = ",") %>%
+    separate(Matches, into = c("start", "end"), sep = "\\.\\.", convert = TRUE)
+
+# 4. Combine MSH2 features
+combined_msh2_features_df <- bind_rows(EBI_msh2_features_df, MSH2_Pfam_df) %>%
+    mutate(Protein_Accession = toupper(Protein_Accession))
+
+# 5. Prepare Feature GRanges
+domain_colors <- c(
+    "CHAIN"      = "black",
+    "Disordered" = "#FFD92F",
+    "MutS_V"     = "#B3B3B3",
+    "PWWP"       = "#bebada",
+    "MutS_I"     = "#66C2A5",
+    "MutS_II"    = "#E78AC3",
+    "MutS_IV"    = "#8DA0CB",
+    "MutS_III"   = "#A6D854"
+)
+
+MSH2_features_gr <- GRanges(
+    seqnames = combined_msh2_features_df$Protein_Accession,
+    ranges = IRanges(
+        start = combined_msh2_features_df$start,
+        end = combined_msh2_features_df$end
+    ),
+    fill = domain_colors[combined_msh2_features_df$Short_Name],
+    height = ifelse(combined_msh2_features_df$Short_Name == "CHAIN", 0.02, 0.09),
+    label = combined_msh2_features_df$Short_Name
+)
+names(MSH2_features_gr) <- MSH2_features_gr$label
+
+# 6. Prepare SNP GRanges
+# Column Mapping for Plot Aesthetics:
+# - AS_new_Amino.acid.edits: Used for mutation labels
+# - AS_new_Clinical.significance: Used for clinical significance (colors)
+# - AS_new_Mutation.category: Used for mutation category (shapes)
+
+MSH2_snps_gr <- GRanges(
+    seqnames = "P43246",
+    ranges = IRanges(start = msh2_snps_df$pos, width = 1),
+    label = msh2_snps_df$AS_new_Amino.acid.edits,
+    score = 1.5
+)
+names(MSH2_snps_gr) <- MSH2_snps_gr$label
+
+# Map ClinVar and category aesthetics (matching MSH6)
+MSH2_snps_gr$color <- case_when(
+    msh2_snps_df$AS_new_Clinical.significance == "Pathogenic" ~ "#e41a1c",
+    msh2_snps_df$AS_new_Clinical.significance == "Pathogenic/Likely pathogenic" ~ "#fd8d3c",
+    msh2_snps_df$AS_new_Clinical.significance == "Conflicting classifications of pathogenicity" ~ "#28D0FF",
+    msh2_snps_df$AS_new_Clinical.significance == "Uncertain significance" ~ "#BF3EFF",
+    grepl("Benign", msh2_snps_df$AS_new_Clinical.significance, ignore.case = TRUE) ~ "#238B45",
+    msh2_snps_df$AS_new_Clinical.significance == "None" ~ "#808080",
+    TRUE ~ "#999999"
+)
+
+# Map mutation type to shapes
+MSH2_snps_gr$shape <- case_when(
+    grepl("Missense", msh2_snps_df$AS_new_Mutation.category, ignore.case = TRUE) ~ "circle",
+    grepl("Nonsense", msh2_snps_df$AS_new_Mutation.category, ignore.case = TRUE) ~ "square",
+    grepl("Silent", msh2_snps_df$AS_new_Mutation.category, ignore.case = TRUE) ~ "triangle",
+    TRUE ~ "diamond"
+)
+
+# Plotting settings
+MSH2_snps_gr$label.parameter.rot <- 90
+MSH2_snps_gr$label.parameter.gp <- list(fontsize = 7)
+MSH2_snps_gr$node.label <- NA
+MSH2_snps_gr$label <- NA
+MSH2_features_gr$label.parameter.gp <- list(fontsize = 7)
+
+# 7. Final Plot Wrapper
+plot_msh2_exon16 <- function() {
+    lolliplot(MSH2_snps_gr, MSH2_features_gr,
+        ranges = GRanges("P43246", IRanges(msh2_exon16_start, msh2_exon16_end)),
+        ylab = "MSH2 Exon 16 BE Hits",
+        yaxis = FALSE,
+        xaxis = c(msh2_exon16_start, 890, 900, 910, 920, 930, msh2_exon16_end),
+        xaxis.gp = gpar(fontsize = 7),
+        ylab.gp = gpar(fontsize = 8),
+        legendPosition = list(position = "right", width = unit(0.8, "inch"))
+    )
+
+    # Add custom legends
+    pushViewport(viewport(x = 0.90, y = 0, width = 0.20, height = 1.0, just = c("center", "bottom")))
+    grid.text("ClinVar Annotations", x = 0.05, y = 0.9, just = "left", gp = gpar(fontface = "bold", cex = 0.7))
+    cv_labels <- c("Pathogenic", "Likely pathogenic", "Conflicting", "Uncertain significance", "Benign/Likely benign", "Not reported")
+    cv_colors <- c("#e41a1c", "#fd8d3c", "#28D0FF", "#BF3EFF", "#238B45", "#808080")
+
+    y_curr <- 0.9
+    for (i in seq_along(cv_labels)) {
+        y_curr <- y_curr - 0.075
+        grid.points(x = unit(0.1, "npc"), y = unit(y_curr, "npc"), pch = 21, gp = gpar(col = cv_colors[i], fill = cv_colors[i], cex = 0.5))
+        grid.text(cv_labels[i], x = unit(0.2, "npc"), y = unit(y_curr, "npc"), just = "left", gp = gpar(fontsize = 7))
+    }
+
+    y_sec2_start <- y_curr - 0.08
+    grid.text("Mutation Category", x = 0.05, y = y_sec2_start, just = "left", gp = gpar(fontface = "bold", cex = 0.7))
+    mut_labels <- c("Missense (Circle)", "Nonsense (Square)")
+    mut_pchs <- c(16, 15)
+    for (j in seq_along(mut_labels)) {
+        y_sec2_start <- y_sec2_start - 0.07
+        grid.points(x = unit(0.1, "npc"), y = unit(y_sec2_start, "npc"), pch = mut_pchs[j], gp = gpar(col = "black", cex = 0.5))
+        grid.text(mut_labels[j], x = unit(0.2, "npc"), y = unit(y_sec2_start, "npc"), just = "left", gp = gpar(fontsize = 7))
+    }
+    popViewport()
+}
+
+# 8. Export
+supp_dir_msh2 <- "./outputs_mutation_plots/MSH2/supplemental/"
+main_dir_msh2 <- "./outputs_mutation_plots/MSH2/main_figs/"
+dir.create(supp_dir_msh2, recursive = TRUE, showWarnings = FALSE)
+dir.create(main_dir_msh2, recursive = TRUE, showWarnings = FALSE)
+
+# Save supplemental CSVs
+write_csv(combined_msh2_features_df, file.path(supp_dir_msh2, "Supplemental_table_combined_msh2_protein_features_EBI_InterPro.csv"))
+write_csv(msh2_snps_df, file.path(supp_dir_msh2, "Supplementary_table_msh2_snps_df_final_plot_data.csv"))
+
+# Save main figures
+pdf(file.path(main_dir_msh2, "MSH2_mutation_lollipop_Exon16_main_fig.pdf"), width = 6.4, height = 2)
+plot_msh2_exon16()
+dev.off()
+
+png(file.path(main_dir_msh2, "MSH2_mutation_lollipop_Exon16_main_fig.png"), width = 6.4, height = 2, units = "in", res = 600)
+plot_msh2_exon16()
+dev.off()
+
+print("MSH2 Exon 16 Figures and Data Exported Successfully.")
+```
+

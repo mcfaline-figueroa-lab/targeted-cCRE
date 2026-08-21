@@ -1,0 +1,382 @@
+---
+title: "KRAB TMZ Survival Screen: Proportion Relative to Average DMSO Analysis"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Setup and Dependencies
+
+```{r libraries, message=FALSE, warning=FALSE}
+# Check and install required packages
+required_packages <- c("dplyr", "ggplot2", "ggrepel", "tibble", "purrr", "plotly", "tidyr", "scales", "htmlwidgets")
+for (pkg in required_packages) {
+    if (!requireNamespace(pkg, quietly = TRUE)) {
+        install.packages(pkg, repos = "http://cran.us.r-project.org")
+    }
+}
+
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+library(tibble)
+library(plotly)
+library(tidyr)
+library(htmlwidgets)
+```
+
+## Define Paths
+
+```{r paths}
+count_dir <- "../data/TMZ_survival_screen/raw_counts"
+sample_sheet_path <- "../data/TMZ_survival_screen/WITH_AXIS_final_CROP_samplesheet_20bp_1000pooled_guides_uniquenumbers_12_2_25.txt"
+metadata_path <- "../02_targeted_cCRE_screen/outputs/TMZ_survival_screen_sgRNA_library/TMZ_survival_screen_pooled_1000_guides_for_publishing.csv"
+output_dir <- "./outputs_KRAB_TMZ_survival"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+```
+
+## Data Loading and Merging
+
+```{r load_data}
+# 1. Read Sample Sheet (GuideID -> Sequence)
+sample_sheet <- read.table(sample_sheet_path, header = FALSE, sep = "\t", stringsAsFactors = FALSE)
+colnames(sample_sheet) <- c("GuideID", "Sequence", "Unk")
+sample_sheet <- sample_sheet %>% select(GuideID, Sequence)
+
+# 2. Read Metadata (Sequence -> ATAC_bin, Gene.Symbol)
+metadata_subset <- read.csv(metadata_path, stringsAsFactors = FALSE)
+
+# Read extended metadata
+extended_metadata_path <- "../02_targeted_cCRE_screen/outputs/merged_crop_library_samplesheet.csv"
+extended_metadata <- read.csv(extended_metadata_path, stringsAsFactors = FALSE)
+
+# Merge: Keep rows from metadata_subset (the 1000 guides) and join with extended_metadata
+# We join on sgRNA.sequence and ATAC_bin
+# Use suffix to preserve original column names (e.g. df_name) and mark extended ones
+metadata <- metadata_subset %>%
+    left_join(extended_metadata, by = c("sgRNA.sequence", "ATAC_bin"), suffix = c("", ".extended")) %>%
+    rename(Sequence = sgRNA.sequence)
+
+# Create guide_type column
+metadata$guide_type <- ifelse(!is.na(metadata$ATAC_bin) & metadata$ATAC_bin != "",
+    metadata$ATAC_bin,
+    metadata$df_name
+)
+# Handle cases where both might be NA/empty
+metadata$guide_type[is.na(metadata$guide_type) | metadata$guide_type == ""] <- "Unknown"
+
+# 3. Read Count Files
+count_files <- list.files(count_dir, pattern = "_counts.txt(\\.gz)?$", full.names = TRUE)
+
+counts_list <- lapply(count_files, function(f) {
+    d <- read.table(f, header = FALSE, stringsAsFactors = FALSE)
+    colnames(d) <- c("Count", "GuideID")
+    sample_name <- gsub("_counts\\.txt(\\.gz)?$", "", basename(f))
+    # Strip potential GEO sample prefix if present
+    sample_name <- gsub("^GSM[0-9]+_KRAB_TMZ_survival_", "", sample_name)
+    d %>% rename(!!sample_name := Count)
+})
+
+# Merge all count dataframes
+count_matrix_df <- counts_list %>% purrr::reduce(full_join, by = "GuideID")
+count_matrix_df[is.na(count_matrix_df)] <- 0
+
+# Save Raw Counts with Metadata
+raw_counts_w_metadata <- count_matrix_df %>%
+    left_join(sample_sheet, by = "GuideID") %>%
+    left_join(metadata, by = "Sequence")
+
+
+# 3b. Read and Merge Additional sgRNA Library Metadata
+sg_lib_path <- "../data/common_references/sgRNA_library_FINAL_w_sgOPTI_CROP_adapters.csv"
+sg_lib <- read.csv(sg_lib_path, stringsAsFactors = FALSE)
+
+# Filtersg_lib to only include sequences present in our data to save time/memory and focus warnings
+active_sequences <- unique(raw_counts_w_metadata$Sequence)
+sg_lib_relevant <- sg_lib %>% filter(sgRNA.sequence %in% active_sequences)
+
+# Check for duplicates and consistency
+# Columns to check for consistency
+check_cols <- c("sgRNA.sequence", "sgRNA.context.sequence", "sgRNA.Strand", "PAM", "Edit")
+
+# Deduplicate logic:
+# Group by sgRNA.sequence and check if all check_cols are identical across rows
+clean_sg_lib <- sg_lib_relevant %>%
+    group_by(sgRNA.sequence) %>%
+    summarize(
+        # Check consistency: do we have >1 unique combination of the checked columns?
+        n_variants = nrow(unique(data.frame(
+            sgRNA.context.sequence, sgRNA.Strand, PAM, Edit
+        ))),
+        # Take the first value for merging (if consistent, they are all same; if inconsistent, we just take one but warn)
+        PAM = dplyr::first(PAM),
+        Edit = dplyr::first(Edit)
+    )
+
+# Identify inconsistent sequences
+inconsistent_seqs <- clean_sg_lib %>%
+    filter(n_variants > 1) %>%
+    pull(sgRNA.sequence)
+
+if (length(inconsistent_seqs) > 0) {
+    warning(paste(
+        "The following sequences have inconsistent metadata (sgRNA.context.sequence, Strand, PAM, or Edit) across duplicates in the library file:",
+        paste(head(inconsistent_seqs), collapse = ", "),
+        ifelse(length(inconsistent_seqs) > 6, "...", "")
+    ))
+} else {
+    print("Consistency check passed: No discrepancies found for (sgRNA.context.sequence, Strand, PAM, or Edit) across duplicates in the library file.")
+}
+
+# Merge into raw_counts_w_metadata
+raw_counts_w_metadata <- raw_counts_w_metadata %>%
+    left_join(clean_sg_lib %>% select(sgRNA.sequence, PAM, Edit), by = c("Sequence" = "sgRNA.sequence"))
+
+# Reorder columns
+sample_cols <- sort(colnames(count_matrix_df)[colnames(count_matrix_df) != "GuideID"])
+other_cols <- setdiff(colnames(raw_counts_w_metadata), c("GuideID", sample_cols))
+raw_counts_w_metadata <- raw_counts_w_metadata %>%
+    select("GuideID", all_of(sample_cols), all_of(other_cols))
+
+raw_counts_csv_path <- file.path(output_dir, "raw_guide_count_w_metadata.csv")
+write.csv(raw_counts_w_metadata, raw_counts_csv_path, row.names = FALSE)
+print(paste("Saved raw counts with metadata to:", raw_counts_csv_path))
+```
+
+## Filter Low-Coverage Midiprep Artifacts
+In this step, we remove guides that were identified as being in the bottom 1.5% of the Midiprep library coverage. These guides are prone to artifacts and are excluded before analysis.
+
+```{r filter_midiprep_artifacts}
+midiprep_cutoff_path <- "../data/TMZ_survival_screen/use_for_cutoff_low_coverage_guides_bottom_1.5pct.csv"
+
+if (file.exists(midiprep_cutoff_path)) {
+    low_cov_guides_to_remove <- read.csv(midiprep_cutoff_path, stringsAsFactors = FALSE)
+    
+    # Display guides being removed
+    print(paste("Removing", nrow(low_cov_guides_to_remove), "guides identified as low-coverage Midiprep artifacts:"))
+    print(low_cov_guides_to_remove %>% select(GuideID, Mean_Counts))
+    
+    # 2. Filter the main dataset
+    n_before <- nrow(raw_counts_w_metadata)
+    raw_counts_w_metadata <- raw_counts_w_metadata %>%
+        anti_join(low_cov_guides_to_remove, by = "GuideID")
+    n_after <- nrow(raw_counts_w_metadata)
+    
+    print(paste("Guides before filter:", n_before))
+    print(paste("Guides after filter:", n_after))
+    print(paste("Successfully removed", n_before - n_after, "guides."))
+    
+} else {
+    stop("ERROR: Midiprep cutoff file not found. Ensure the midiprep analysis script has been run.")
+}
+```
+
+## Analysis: Proportion Relative to Average DMSO
+
+```{r analysis}
+# Define Sample Groups
+dmso_cols <- c("01GG01_S1", "02GG02_S2", "03GG03_S3")
+tmz_cols <- c("04GG04_S4", "05GG05_S5", "06GG06_S6")
+
+# 1. Calculate Average DMSO Count per Guide
+# We use the raw counts dataframe for calculation
+df <- raw_counts_w_metadata
+
+# Ensure numeric
+for (col in c(dmso_cols, tmz_cols)) {
+    df[[col]] <- as.numeric(df[[col]])
+}
+
+# Row-wise average for DMSO
+df$average_DMSO_count <- rowMeans(df[, dmso_cols], na.rm = TRUE)
+
+# 2. Calculate NTC Normalization Factor
+# "average NTC_TMZ / average NTC_DMSO"
+# Identify NTC rows
+ntc_rows <- grepl("non_targeting_control", df$guide_type)
+
+# Average NTC Count in DMSO (Global average of all NTCs across all DMSO replicates)
+# Sum of all NTC counts in DMSO / (Number of NTCs * Number of Replicates)
+ntc_dmso_vals <- unlist(df[ntc_rows, dmso_cols])
+avg_ntc_dmso <- mean(ntc_dmso_vals, na.rm = TRUE)
+
+# Average NTC Count in TMZ
+ntc_tmz_vals <- unlist(df[ntc_rows, tmz_cols])
+avg_ntc_tmz <- mean(ntc_tmz_vals, na.rm = TRUE)
+
+# Calculate Scaling Factor (Log2 Ratio of NTCs)
+# calculate Total Library Counts to convert to proportions.
+
+# Total Counts per Sample
+total_counts <- colSums(df[, c(dmso_cols, tmz_cols)], na.rm = TRUE)
+avg_total_dmso <- mean(total_counts[dmso_cols])
+avg_total_tmz <- mean(total_counts[tmz_cols])
+
+# Proportion NTC DMSO = Avg_NTC_DMSO / Avg_Total_DMSO
+prop_ntc_dmso <- avg_ntc_dmso / avg_total_dmso
+prop_ntc_tmz <- avg_ntc_tmz / avg_total_tmz
+
+# NTC Shift (Log2 Ratio)
+ntc_shift <- log2(prop_ntc_tmz / prop_ntc_dmso)
+
+print(paste("Average NTC DMSO Count:", avg_ntc_dmso))
+print(paste("Average NTC TMZ Count:", avg_ntc_tmz))
+print(paste("NTC Shift (Log2FC):", ntc_shift))
+
+# 3. Calculate Scaled Log2FC for Each Guide and Each TMZ Replicate
+# We want to plot each TMZ replicate individually against the Average DMSO.
+# Pivot TMZ columns to long format
+long_df <- df %>%
+    select(
+        GuideID, guide_type, df_name, genomic_start, genomic_end, average_DMSO_count,
+        ATAC_bin_start, Sequence, sgRNA, sgRNA.Strand, X..edits, Nucleotide.edits, Amino.acid.edits, Mutation.category,
+        all_of(tmz_cols)
+    ) %>%
+    pivot_longer(cols = all_of(tmz_cols), names_to = "TMZ_Sample", values_to = "TMZ_Count")
+
+# Ensure genomic_start is numeric for correct sorting
+long_df$genomic_start <- as.numeric(long_df$genomic_start)
+long_df$ATAC_bin_start <- as.numeric(long_df$ATAC_bin_start)
+
+# Calculate Proportions
+# We need the total count for each specific TMZ sample
+long_df$Total_TMZ_Sample <- total_counts[long_df$TMZ_Sample]
+long_df$Total_Avg_DMSO <- avg_total_dmso
+
+# Add pseudocount
+long_df$Prop_TMZ <- (long_df$TMZ_Count + 1) / (long_df$Total_TMZ_Sample + 1)
+long_df$Prop_Avg_DMSO <- (long_df$average_DMSO_count + 1) / (long_df$Total_Avg_DMSO + 1)
+
+# Calculate Raw Log2FC
+long_df$Log2FC <- log2(long_df$Prop_TMZ / long_df$Prop_Avg_DMSO)
+
+# Apply NTC Scaling (Subtract the shift to center NTCs at 0)
+long_df$Scaled_Log2FC <- long_df$Log2FC - ntc_shift
+
+# 4. Filter out NTCs for Plotting
+plot_df <- long_df %>% filter(!grepl("non_targeting_control", guide_type))
+```
+
+```{r}
+# ==========================================
+# NEW: Calculate Null Distribution from GuideID Patterns
+# ==========================================
+# Calculate null distribution based on patterns found in the GuideID column
+null_stats <- plot_df %>%
+    # Use grepl to find either pattern anywhere in the GuideID string
+    filter(grepl("local_negative_controls|AAVS1_negative_control", GuideID)) %>%
+    summarize(
+        mu = mean(Scaled_Log2FC, na.rm = TRUE),
+        sigma = sd(Scaled_Log2FC, na.rm = TRUE),
+        n_guides = n_distinct(GuideID)
+    )
+
+# Establish the Conservative Threshold (2 Sigma)
+combined_threshold <- null_stats$mu + (2 * null_stats$sigma)
+
+# Output results for verification
+print(paste("Number of unique control guides found:", null_stats$n_guides))
+print(paste("Conservative Threshold (2-sigma):", round(combined_threshold, 4)))
+
+# Save threshold to file for downstream use
+threshold_path <- file.path(output_dir, "combined_threshold.csv")
+write.csv(data.frame(combined_threshold = combined_threshold), threshold_path, row.names = FALSE)
+print(paste("Saved threshold to:", threshold_path))
+# ==========================================
+```
+
+```{r}
+# ==========================================
+# NEW: Stouffer’s Z-score Method for Combined P-values
+# ==========================================
+
+# 1. Calculate Individual Z-scores for every replicate
+# This measures how many standard deviations each point is from the null mean
+plot_df <- plot_df %>%
+    mutate(
+        z_score = (Scaled_Log2FC - null_stats$mu) / null_stats$sigma
+    )
+
+# 2. Combine Z-scores for each GuideID (Stouffer's Method)
+guide_level_stats <- plot_df %>%
+    group_by(GuideID, guide_type, df_name, genomic_start, genomic_end) %>%
+    summarize(
+        mean_scaled_LFC = mean(Scaled_Log2FC, na.rm = TRUE),
+        # Stouffer's formula: sum(Z) / sqrt(k) where k=3 replicates
+        combined_z = sum(z_score, na.rm = TRUE) / sqrt(n()),
+        # Total number of replicates used for this guide
+        n_reps = n(),
+        .groups = "drop"
+    ) %>%
+    # 3. Convert Combined Z to P-value and Q-value
+    mutate(
+        # Two-tailed p-value calculation
+        stouffer_p = 2 * pnorm(-abs(combined_z)),
+        # Apply Benjamini-Hochberg (BH) Multiple Hypothesis Correction
+        q_value = p.adjust(stouffer_p, method = "BH")
+    )
+
+# 4. Save the results to your project folder
+stouffer_results_path <- file.path(output_dir, "Guide_Level_Stouffers_Results.csv")
+write.csv(guide_level_stats, stouffer_results_path, row.names = FALSE)
+
+print(paste("Stouffer's analysis complete. Saved to:", stouffer_results_path))
+
+# 5. Quick check: How many guides pass at q < 0.01?
+n_sig <- sum(guide_level_stats$q_value < 0.01, na.rm = TRUE)
+print(paste("Number of unique guides with q < 0.01:", n_sig))
+
+# Filter for significant hits (FDR < 1%)
+# We arrange by q_value so your most confident hits are at the top
+significant_hits <- guide_level_stats %>%
+    filter(q_value < 0.01) %>%
+    arrange(q_value)
+
+# Save the significant hits to a separate CSV for easy sharing/referencing
+sig_hits_path <- file.path(output_dir, "Significant_Guides_q_less_0.01.csv")
+write.csv(significant_hits, sig_hits_path, row.names = FALSE)
+
+print(paste("Found", nrow(significant_hits), "significant guides at q < 0.01."))
+print(paste("Significant hits saved to:", sig_hits_path))
+
+# Display the top 10 hits in your R console/HTML report
+head(significant_hits, 10)
+
+# ==========================================
+# Export final dataset for downstream stacked jitter plots
+# ==========================================
+plot_df_stouffer <- plot_df %>%
+    left_join(guide_level_stats %>% select(GuideID, q_value), by = "GuideID") %>%
+    mutate(
+        is_significant = !is.na(q_value) & q_value < 0.01,
+        Legend_Label_Stouffer = ifelse(is_significant, guide_type, "Not Significant")
+    ) %>%
+    mutate(
+        primary_sort = ifelse(guide_type == "AAVS1_negative_control", 0, 1)
+    ) %>%
+    arrange(
+        primary_sort,
+        ATAC_bin_start,
+        genomic_start,
+        GuideID
+    ) %>%
+    mutate(GuideID = factor(GuideID, levels = unique(GuideID)))
+
+# Match legacy column order
+cols_order <- c(
+    "GuideID", "guide_type", "df_name", "genomic_start", "genomic_end",
+    "average_DMSO_count", "ATAC_bin_start", "Sequence", "sgRNA", "sgRNA.Strand",
+    "X..edits", "Nucleotide.edits", "Amino.acid.edits", "Mutation.category",
+    "TMZ_Sample", "TMZ_Count", "Total_TMZ_Sample", "Total_Avg_DMSO",
+    "Prop_TMZ", "Prop_Avg_DMSO", "Log2FC", "Scaled_Log2FC", "z_score",
+    "primary_sort", "q_value", "is_significant", "Legend_Label_Stouffer"
+)
+plot_df_stouffer <- plot_df_stouffer %>% select(all_of(cols_order))
+
+stouffer_data_csv <- file.path(output_dir, "bottom_1pt5percent_guides_removed_KRAB_plot_df_stouffer_data_final.csv")
+write.csv(plot_df_stouffer, stouffer_data_csv, row.names = FALSE)
+print(paste("Saved Stouffer's plotting data to:", stouffer_data_csv))
+```

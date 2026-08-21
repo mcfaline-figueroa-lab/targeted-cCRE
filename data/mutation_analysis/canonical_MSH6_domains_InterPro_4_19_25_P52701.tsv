@@ -1,0 +1,37 @@
+Accession	Name	Short Name	Source Database	Type	Integrated Into	Integrated Signatures	GO Terms	Protein Accession	Protein Length	Matches
+cd05837	PWWP domain found in DNA mismatch repair protein MSH6 and similar proteins	PWWP_MSH6	cdd	domain				p52701	1360	90..193
+G3DSA:1.10.1420.10			cathgene3d	homologous_superfamily				p52701	1360	733..890,1043..1064,908..1040
+G3DSA:2.30.30.140			cathgene3d	homologous_superfamily				p52701	1360	68..201
+G3DSA:3.30.420.110	MutS, connector domain		cathgene3d	homologous_superfamily	IPR036678			p52701	1360	536..732
+G3DSA:3.40.1170.10	DNA repair protein MutS, domain I		cathgene3d	homologous_superfamily	IPR016151			p52701	1360	362..531
+G3DSA:3.40.50.300	P-loop containing nucleotide triphosphate hydrolases		cathgene3d	homologous_superfamily	IPR027417			p52701	1360	1073..1335
+IPR000313	PWWP domain	PWWP_dom	interpro	domain		PS50812,SM00293,PF00855		p52701	1360	90..183
+IPR000432	DNA mismatch repair protein MutS, C-terminal	DNA_mismatch_repair_MutS_C	interpro	domain		PS00486,PF00488,SM00534	GO:0005524,GO:0030983,GO:0006298	p52701	1360	1127..1323
+IPR007695	DNA mismatch repair protein MutS-like, N-terminal	DNA_mismatch_repair_MutS-lik_N	interpro	domain		PF01624	GO:0005524,GO:0030983,GO:0006298	p52701	1360	407..524
+IPR007696	DNA mismatch repair protein MutS, core	DNA_mismatch_repair_MutS_core	interpro	domain		PF05192,SM00533	GO:0005524,GO:0030983,GO:0006298	p52701	1360	739..1102
+IPR007860	DNA mismatch repair protein MutS, connector domain	DNA_mmatch_repair_MutS_con_dom	interpro	domain		PF05188	GO:0005524,GO:0030983,GO:0006298	p52701	1360	538..694
+IPR007861	DNA mismatch repair protein MutS, clamp	DNA_mismatch_repair_MutS_clamp	interpro	domain		PF05190	GO:0005524,GO:0030983,GO:0006298	p52701	1360	932..1024
+IPR016151	DNA mismatch repair protein MutS, N-terminal	DNA_mismatch_repair_MutS_N	interpro	homologous_superfamily		G3DSA:3.40.1170.10,SSF55271	GO:0005524,GO:0030983,GO:0006298	p52701	1360	362..531
+IPR017261	DNA mismatch repair protein MutS/MSH	DNA_mismatch_repair_MutS/MSH	interpro	family		PIRSF037677	GO:0030983,GO:0006298	p52701	1360	62..1351
+IPR027417	P-loop containing nucleoside triphosphate hydrolase	P-loop_NTPase	interpro	homologous_superfamily		G3DSA:3.40.50.300,SSF52540		p52701	1360	1073..1335
+IPR036187	DNA mismatch repair protein MutS, core domain superfamily	DNA_mismatch_repair_MutS_sf	interpro	homologous_superfamily		SSF48334		p52701	1360	736..1068
+IPR036678	MutS, connector domain superfamily	MutS_con_dom_sf	interpro	homologous_superfamily		G3DSA:3.30.420.110,SSF53150	GO:0005524,GO:0030983,GO:0006298	p52701	1360	536..732
+IPR045076	DNA mismatch repair MutS	MutS	interpro	family		PTHR48466,PTHR11361	GO:0005524,GO:0030983,GO:0140664,GO:0006298	p52701	1360	410..1338
+NF003810	DNA mismatch repair protein MutS	PRK05399.1	ncbifam	family				p52701	1360	407..1319
+PF00488	MutS domain V	MutS_V	pfam	domain	IPR000432			p52701	1360	1130..1323
+PF00855	PWWP domain	PWWP	pfam	domain	IPR000313			p52701	1360	93..183
+PF01624	MutS domain I	MutS_I	pfam	domain	IPR007695			p52701	1360	407..524
+PF05188	MutS domain II	MutS_II	pfam	domain	IPR007860			p52701	1360	538..694
+PF05190	MutS family domain IV	MutS_IV	pfam	domain	IPR007861			p52701	1360	932..1024
+PF05192	MutS domain III	MutS_III	pfam	domain	IPR007696			p52701	1360	739..931,1025..1064
+PIRSF037677	DNA mismatch repair protein Msh6	DNA_mis_repair_Msh6	pirsf	family	IPR017261			p52701	1360	62..1351
+PS00486	DNA mismatch repair proteins mutS family signature	DNA_MISMATCH_REPAIR_2	prosite	conserved_site	IPR000432			p52701	1360	1208..1224
+PS50812	PWWP domain profile	PWWP	profile	domain	IPR000313			p52701	1360	92..154
+PTHR11361	DNA MISMATCH REPAIR PROTEIN MUTS FAMILY MEMBER		panther	family	IPR045076			p52701	1360	410..1338
+SM00293	domain with conserved PWWP motif	PWWP	smart	domain	IPR000313			p52701	1360	90..152
+SM00533	DNA-binding domain of DNA mismatch repair MUTS family	MUTSd	smart	domain	IPR007696			p52701	1360	753..1102
+SM00534	ATPase domain of DNA mismatch repair MUTS family	MUTSac	smart	domain	IPR000432			p52701	1360	1127..1321
+SSF48334	DNA repair protein MutS, domain III		ssf	homologous_superfamily	IPR036187			p52701	1360	736..1068
+SSF52540	P-loop containing nucleoside triphosphate hydrolases		ssf	homologous_superfamily	IPR027417			p52701	1360	1085..1325
+SSF55271	DNA repair protein MutS, domain I		ssf	homologous_superfamily	IPR016151			p52701	1360	395..521
+SSF63748	Tudor/PWWP/MBT		ssf	homologous_superfamily				p52701	1360	86..209

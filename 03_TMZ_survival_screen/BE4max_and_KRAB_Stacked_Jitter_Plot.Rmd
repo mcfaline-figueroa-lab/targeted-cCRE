@@ -1,0 +1,1193 @@
+---
+title: "BE4max and KRAB Stacked Jitter Plots Analysis"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Setup and Dependencies
+
+```{r libraries, message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+library(plotly)
+library(scales)
+library(htmlwidgets)
+```
+
+## Define Paths
+
+```{r paths}
+# Input Files (Using filtered 1.5% removal data)
+krab_csv_path <- "./outputs_KRAB_TMZ_survival/bottom_1pt5percent_guides_removed_KRAB_plot_df_stouffer_data_final.csv"
+be4max_csv_path <- "./outputs_BE4max_TMZ_survival/bottom_1pt5percent_guides_removed_BE4max_plot_df_stouffer_data_final.csv"
+
+# Output Directory
+output_dir <- "./outputs_stacked_jitter_plots"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+# Filename Suffix
+file_suffix <- "_bottom_1.5percent_sgRNAs_removed"
+```
+
+## Data Loading and Preparation
+
+```{r load_data}
+# 1. Load Data
+krab_df <- read.csv(krab_csv_path, stringsAsFactors = FALSE)
+be4max_df <- read.csv(be4max_csv_path, stringsAsFactors = FALSE)
+```
+
+```{r isolate_STON1_hits}
+# Define columns to keep
+keep_cols <- c(
+    "GuideID", "guide_type", "chr", "genomic_start", "genomic_end",
+    "Sequence", "sgRNA", "sgRNA.Strand", "X..edits",
+    "Nucleotide.edits", "Amino.acid.edits", "Mutation.category", "is_significant"
+)
+
+# Filter KRAB STON1 Hits
+KRAB_STON1_stouffers_significant_guides <- krab_df %>%
+    filter(guide_type == "chr2:48530040-48530316" & is_significant == TRUE) %>%
+    # Convert to 1-based coordinates for UCSC and parse chromosome
+    mutate(
+        genomic_start = as.numeric(genomic_start) + 1,
+        genomic_end = as.numeric(genomic_end) + 1,
+        chr = sub(":.*", "", guide_type)
+    ) %>%
+    dplyr::select(all_of(keep_cols)) %>%
+    distinct()
+
+# Filter BE4max STON1 Hits
+BE4max_STON1_stouffers_significant_guides <- be4max_df %>%
+    filter(guide_type == "chr2:48530040-48530316" & is_significant == TRUE) %>%
+    # Convert to 1-based coordinates for UCSC and parse chromosome
+    mutate(
+        genomic_start = as.numeric(genomic_start) + 1,
+        genomic_end = as.numeric(genomic_end) + 1,
+        chr = sub(":.*", "", guide_type)
+    ) %>%
+    dplyr::select(all_of(keep_cols)) %>%
+    distinct()
+
+# Optional: Print counts to verify
+print(paste("KRAB STON1 Significant Guides (Unique):", nrow(KRAB_STON1_stouffers_significant_guides)))
+print(paste("BE4max STON1 Significant Guides (Unique):", nrow(BE4max_STON1_stouffers_significant_guides)))
+
+# Save dataframes as CSV files
+csv_out_dir <- "./outputs_stacked_jitter_plots/supplementary_tables_STON1_hit_guides"
+if (!dir.exists(csv_out_dir)) dir.create(csv_out_dir, recursive = TRUE)
+
+write.csv(KRAB_STON1_stouffers_significant_guides, file.path(csv_out_dir, "KRAB_STON1_stouffers_significant_guides.csv"), row.names = FALSE)
+write.csv(BE4max_STON1_stouffers_significant_guides, file.path(csv_out_dir, "BE4max_STON1_stouffers_significant_guides.csv"), row.names = FALSE)
+
+# ==========================================
+# Export as BED Files for UCSC/IGV/GVIZ plotting
+# ==========================================
+
+# 1. Define BED output directory
+bed_out_dir <- "./outputs_stacked_jitter_plots/final_bed_files_stouffers_significant_sgRNA_hits_for_IGV_type_plots"
+if (!dir.exists(bed_out_dir)) dir.create(bed_out_dir, recursive = TRUE)
+
+# 2. Function to save as BED (no header, tab-separated)
+# Order: chrom, chromStart, chromEnd, name
+save_as_bed <- function(df, filename) {
+    bed_data <- df %>%
+        dplyr::select(chr, genomic_start, genomic_end, Sequence)
+
+    write.table(bed_data,
+        file = file.path(bed_out_dir, filename),
+        quote = FALSE,
+        sep = "\t",
+        row.names = FALSE,
+        col.names = FALSE
+    )
+}
+
+# 3. Save the files
+if (nrow(KRAB_STON1_stouffers_significant_guides) > 0) {
+    save_as_bed(KRAB_STON1_stouffers_significant_guides, paste0("KRAB_STON1_significant_hits", file_suffix, ".bed"))
+}
+if (nrow(BE4max_STON1_stouffers_significant_guides) > 0) {
+    save_as_bed(BE4max_STON1_stouffers_significant_guides, paste0("BE4max_STON1_significant_hits", file_suffix, ".bed"))
+}
+
+print(paste("BED files saved to:", bed_out_dir))
+```
+
+```{r thresholds}
+# 2. Load Pre-calculated Thresholds (From filtered analysis folders)
+krab_thresh_path <- "./outputs_KRAB_TMZ_survival/combined_threshold.csv"
+be4max_thresh_path <- "./outputs_BE4max_TMZ_survival/combined_threshold.csv"
+
+krab_threshold <- read.csv(krab_thresh_path)$combined_threshold
+be4max_threshold <- read.csv(be4max_thresh_path)$combined_threshold
+
+print(paste("KRAB Threshold (Loaded):", round(krab_threshold, 4)))
+print(paste("BE4max Threshold (Loaded):", round(be4max_threshold, 4)))
+
+# 3. Load Manual Coloring from CSV
+# We now use pre-assigned colors for global consistency
+manual_colors_path <- "../data/ATAC_bin_color_map/manual_colors_ATAC_bins.csv"
+manual_colors_df <- read.csv(manual_colors_path, stringsAsFactors = FALSE)
+
+# Filter for rows that have a color assigned and create named vector
+# Using guide_type as names and final_colors as values
+default_colors <- manual_colors_df$final_colors
+names(default_colors) <- manual_colors_df$guide_type
+
+# Override controls to black
+static_controls <- c("AAVS1_negative_control", "hCRISPRa_non_targeting_control", "hCRISPRi_non_targeting_control")
+
+# Dynamically find guide_types associated with local controls (by checking GuideID)
+# Filter for local controls in both DFs
+local_control_rows_krab <- krab_df[grepl("local_negative_controls", krab_df$GuideID), ]
+local_control_rows_be4max <- be4max_df[grepl("local_negative_controls", be4max_df$GuideID), ]
+
+# Extract their guide types
+local_control_types <- unique(c(local_control_rows_krab$guide_type, local_control_rows_be4max$guide_type))
+
+# Combine all controls
+all_control_types <- unique(c(static_controls, local_control_types))
+
+# Assign "black" to all identified control types
+for (ctl in all_control_types) {
+    if (ctl %in% names(default_colors)) {
+        default_colors[ctl] <- "black"
+    }
+}
+
+# Add "Not Significant" color
+stouffer_colors <- default_colors
+stouffer_colors["Not Significant"] <- "lightgrey"
+
+# 4. Helper Function to Process Dataframe (Sort + Legend Column + Capping)
+process_df <- function(df, dataset_name) {
+    # Ensure sorting columns are numeric
+    df$genomic_start <- as.numeric(df$genomic_start)
+    df$ATAC_bin_start <- as.numeric(df$ATAC_bin_start)
+
+    # Re-apply Significance Column just in case
+    if (!"Legend_Label_Stouffer" %in% colnames(df)) {
+        df <- df %>%
+            mutate(
+                is_stouffer_sig = !is.na(q_value) & q_value < 0.01,
+                Legend_Label_Stouffer = ifelse(is_stouffer_sig, guide_type, "Not Significant")
+            )
+    }
+
+    # ---------------------------------------------------------
+    # Outlier Capping Logic
+    # ---------------------------------------------------------
+    # Identify outliers
+    outliers <- df %>%
+        filter(Scaled_Log2FC < -2.35 | Scaled_Log2FC > 2.35)
+
+    if (nrow(outliers) > 0) {
+        print(paste("--- Capped Outliers in", dataset_name, "---"))
+        for (i in 1:nrow(outliers)) {
+            print(paste(
+                "GuideID:", outliers$GuideID[i],
+                "| Original Scaled_Log2FC:", round(outliers$Scaled_Log2FC[i], 4)
+            ))
+        }
+    }
+
+    # Apply Capping, Create Plotted_LFC, and Define Shape
+    df <- df %>%
+        mutate(
+            Is_Outlier = Scaled_Log2FC < -2.35 | Scaled_Log2FC > 2.35,
+            Plotted_LFC = case_when(
+                Scaled_Log2FC < -2.35 ~ -2.33, # Cap bottom
+                Scaled_Log2FC > 2.35 ~ 2.33, # Cap top
+                TRUE ~ Scaled_Log2FC
+            ),
+            # Shape Factor: "Normal" vs "Capped"
+            Point_Shape = ifelse(Is_Outlier, "Capped", dataset_name)
+        )
+
+    # Apply Sorting
+    df <- df %>%
+        mutate(
+            primary_sort = ifelse(guide_type == "AAVS1_negative_control", 0, 1)
+        ) %>%
+        arrange(
+            primary_sort,
+            ATAC_bin_start,
+            genomic_start,
+            GuideID
+        ) %>%
+        mutate(GuideID = factor(GuideID, levels = unique(GuideID)))
+
+    return(df)
+}
+
+krab_plot_df <- process_df(krab_df, "KRAB")
+be4max_plot_df <- process_df(be4max_df, "BE4max")
+
+# Combine Dataframes for Faceting
+krab_plot_df$Dataset <- "KRAB"
+be4max_plot_df$Dataset <- "BE4max"
+
+combined_plot_df <- rbind(krab_plot_df, be4max_plot_df)
+
+# Set Factor Levels to ensure KRAB is on Top
+combined_plot_df$Dataset <- factor(combined_plot_df$Dataset, levels = c("KRAB", "BE4max"))
+
+# Define Threshold Dataframe for Faceted lines
+threshold_df <- data.frame(
+    Dataset = factor(c("KRAB", "BE4max"), levels = c("KRAB", "BE4max")),
+    Threshold = c(krab_threshold, be4max_threshold)
+)
+```
+
+## Generate Combined Faceted Plot
+
+```{r combined_plot, fig.height=14, fig.width=12}
+p_combined <- ggplot(combined_plot_df, aes(
+    x = GuideID, y = Plotted_LFC, color = Legend_Label_Stouffer, shape = Point_Shape,
+    text = paste(
+        "Dataset:", Dataset,
+        "<br>GuideID:", GuideID,
+        "<br>Guide Type:", guide_type,
+        "<br>Genomic Start:", genomic_start,
+        "<br>Original Scaled Log2FC:", round(Scaled_Log2FC, 2),
+        "<br>Plotted Log2FC:", round(Plotted_LFC, 2),
+        "<br>q-value:", formatC(q_value, format = "e", digits = 2),
+        "<br>Capped:", Is_Outlier
+    )
+)) +
+    geom_jitter(width = 0.2, size = 1.5, alpha = 0.7) +
+
+    # Facet Specification: Dataset on rows (Vertical Stack), label on Right side
+    facet_grid(Dataset ~ .) +
+    scale_color_manual(values = stouffer_colors) +
+    # Map shapes: KRAB = 16 (circle), BE4max = 17 (triangle), Capped = 15 (square)
+    scale_shape_manual(values = c("KRAB" = 16, "BE4max" = 17, "Capped" = 15), guide = "none") +
+    scale_y_continuous(limits = c(-2.35, 2.35)) +
+    theme_classic() +
+    theme(
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        # Remove the weird grey box (strip background)
+        strip.background = element_blank(),
+        # Rotate facet labels 90 degrees (text runs vertical)
+        strip.text.y = element_text(size = 12, face = "bold", angle = -90)
+    ) +
+    labs(
+        title = "Stacked Proportion Relative to Average DMSO (Stouffer's FDR < 0.01)",
+        x = "GuideID",
+        y = "Scaled Log2FC"
+    ) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey") +
+
+    # Add Threshold Lines per Facet
+    geom_hline(data = threshold_df, aes(yintercept = Threshold), linetype = "dotted", color = "darkgrey") +
+    geom_hline(data = threshold_df, aes(yintercept = -Threshold), linetype = "dotted", color = "darkgrey")
+
+plotly_combined <- ggplotly(p_combined, tooltip = "text")
+
+# Save with verbose debugging
+print(paste("Checking output directory:", output_dir))
+if (!dir.exists(output_dir)) {
+    print("Directory does not exist. Creating...")
+    dir.create(output_dir, recursive = TRUE)
+}
+
+html_filename <- file.path(output_dir, paste0("KRAB_BE4max_Stacked_Faceted_Plot", file_suffix, ".html"))
+print(paste("Attempting to save plot to:", html_filename))
+
+tryCatch(
+    {
+        saveWidget(plotly_combined, html_filename, selfcontained = TRUE)
+        if (file.exists(html_filename)) {
+            print(paste("SUCCESS: File created at", html_filename))
+            print(paste("File size:", file.info(html_filename)$size, "bytes"))
+        } else {
+            print("WARNING: saveWidget ran without error, but file was NOT found.")
+        }
+    },
+    error = function(e) {
+        print(paste("ERROR saving plot:", e$message))
+    }
+)
+```
+
+## Generate Overlaid Jitter Plot
+
+```{r overlaid_plot, fig.height=8, fig.width=12}
+# Prepare Data for Overlaid Plot
+overlaid_df <- combined_plot_df %>%
+    mutate(
+        # Shape Logic: Capped (Circle=16) > KRAB (Star=8) > BE4max (Square=15)
+        Overlaid_Shape = case_when(
+            Is_Outlier ~ "Capped",
+            Dataset == "KRAB" ~ "KRAB",
+            Dataset == "BE4max" ~ "BE4max"
+        ),
+        # Size Logic: Significant (Not Sig/Control color check) -> Large (2.5), Else -> Small (1)
+        # Using Legend_Label_Stouffer to determine significance (Grey = Not Sig)
+        Overlaid_Size = ifelse(Legend_Label_Stouffer == "Not Significant", "Small", "Large"),
+        # Manual X Calculation for consistent dodging + ordering
+        # Convert factor to integer, then offset KRAB left, BE4max right
+        x_manual = as.integer(GuideID) + ifelse(Dataset == "KRAB", -0.25, 0.25)
+    ) %>%
+    # Sorting: Ensure "Small" (Grey) points are plotted FIRST, "Large" (Sig) LAST (on top)
+    arrange(factor(Overlaid_Size, levels = c("Small", "Large")))
+
+# Split into Background and Foreground for Strict Z-ordering
+df_bg <- overlaid_df %>% filter(Overlaid_Size == "Small")
+df_fg <- overlaid_df %>% filter(Overlaid_Size == "Large")
+
+p_overlaid <- ggplot() +
+    # Layer 1: Background (Non-Significant / Small)
+    geom_jitter(
+        data = df_bg,
+        aes(
+            x = x_manual, y = Plotted_LFC,
+            color = Legend_Label_Stouffer,
+            shape = Overlaid_Shape,
+            size = Overlaid_Size,
+            text = paste(
+                "Dataset:", Dataset,
+                "<br>GuideID:", GuideID,
+                "<br>Guide Type:", guide_type,
+                "<br>Original Scaled Log2FC:", round(Scaled_Log2FC, 2),
+                "<br>Plotted Log2FC:", round(Plotted_LFC, 2),
+                "<br>q-value:", formatC(q_value, format = "e", digits = 2),
+                "<br>Capped:", Is_Outlier
+            )
+        ),
+        width = 0.15, height = 0, alpha = 0.7
+    ) +
+
+    # Layer 2: Foreground (Significant / Large) - Plotted ON TOP
+    geom_jitter(
+        data = df_fg,
+        aes(
+            x = x_manual, y = Plotted_LFC,
+            color = Legend_Label_Stouffer,
+            shape = Overlaid_Shape,
+            size = Overlaid_Size,
+            text = paste(
+                "Dataset:", Dataset,
+                "<br>GuideID:", GuideID,
+                "<br>Guide Type:", guide_type,
+                "<br>Original Scaled Log2FC:", round(Scaled_Log2FC, 2),
+                "<br>Plotted Log2FC:", round(Plotted_LFC, 2),
+                "<br>q-value:", formatC(q_value, format = "e", digits = 2),
+                "<br>Capped:", Is_Outlier
+            )
+        ),
+        width = 0.15, height = 0, alpha = 0.7
+    ) +
+    scale_color_manual(values = stouffer_colors) +
+
+    # Shape Logic: KRAB=16 (Circle), BE4max=15 (Square), Capped=17 (Triangle)
+    # Shape Logic: KRAB=16 (Circle), BE4max=17 (Triangle), Capped=15 (Square)
+    scale_shape_manual(values = c("KRAB" = 16, "BE4max" = 17, "Capped" = 15), guide = "none") +
+
+    # Size Logic: Large=2.5, Small=1.0
+    scale_size_manual(values = c("Large" = 2.5, "Small" = 1.0), guide = "none") +
+    scale_y_continuous(limits = c(-2.35, 2.35)) +
+    theme_classic() +
+    theme(
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank()
+    ) +
+    labs(
+        title = "Overlaid Proportion Relative to Average DMSO (Stouffer's FDR < 0.05)",
+        x = "GuideID",
+        y = "Scaled Log2FC"
+    ) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey")
+
+
+# Save Dataframe used for plotting
+plot_data_csv <- file.path(output_dir, paste0("Proportion_Rel_Avg_DMSO_Data", file_suffix, ".csv"))
+write.csv(combined_plot_df, plot_data_csv, row.names = FALSE)
+print(paste("Saved plotting data to:", plot_data_csv))
+
+plotly_overlaid <- ggplotly(p_overlaid, tooltip = "text")
+
+# Save Overlaid Plot
+html_filename_overlaid <- file.path(output_dir, paste0("KRAB_BE4max_Overlaid_Stouffers_Plot", file_suffix, ".html"))
+print(paste("Attempting to save overlaid plot to:", html_filename_overlaid))
+
+tryCatch(
+    {
+        saveWidget(plotly_overlaid, html_filename_overlaid, selfcontained = TRUE)
+        if (file.exists(html_filename_overlaid)) {
+            print(paste("SUCCESS: Overlaid File created at", html_filename_overlaid))
+        } else {
+            print("WARNING: saveWidget ran without error, but overlaid file was NOT found.")
+        }
+    },
+    error = function(e) {
+        print(paste("ERROR saving overlaid plot:", e$message))
+    }
+)
+```
+
+## Generate Simplified Overlaid Plot (Black/Blue)
+
+```{r simple_overlaid_plot, fig.height=8, fig.width=12}
+# Prepare Data for Simplified Coloring
+# Logic:
+# - Not Significant -> "Not Significant" (Light Grey)
+# - Significant + KRAB -> "KRAB Significant" (Black)
+# - Significant + BE4max -> "BE4max Significant" (Light Blue)
+simple_df <- overlaid_df %>%
+    mutate(
+        Legend_Label_Simple = case_when(
+            Legend_Label_Stouffer == "Not Significant" ~ "Not Significant",
+            Dataset == "KRAB" ~ "KRAB Significant",
+            Dataset == "BE4max" ~ "BE4max Significant"
+        )
+    )
+
+# Split for Z-ordering (same as before)
+# Split for Z-ordering (same as before)
+# Split for Z-ordering: Background, Foreground KRAB, Foreground BE4max
+df_bg_simple <- simple_df %>% filter(Overlaid_Size == "Small")
+df_fg_simple_krab <- simple_df %>% filter(Overlaid_Size == "Large" & Dataset == "KRAB")
+df_fg_simple_be4max <- simple_df %>% filter(Overlaid_Size == "Large" & Dataset == "BE4max")
+
+# Define Simple Colors
+simple_colors <- c(
+    "Not Significant" = "lightgrey",
+    "KRAB Significant" = "black",
+    "BE4max Significant" = "#1ABA22" # Custom Green 2
+)
+
+p_simple <- ggplot() +
+    # Layer 1: Background (Non-Significant / Small)
+    geom_jitter(
+        data = df_bg_simple,
+        aes(
+            x = x_manual, y = Plotted_LFC,
+            color = Legend_Label_Simple,
+            shape = Overlaid_Shape,
+            size = Overlaid_Size,
+            text = paste(
+                "Dataset:", Dataset,
+                "<br>GuideID:", GuideID,
+                "<br>Guide Type:", guide_type,
+                "<br>Significance:", Legend_Label_Simple,
+                "<br>Original Scaled Log2FC:", round(Scaled_Log2FC, 2),
+                "<br>Plotted Log2FC:", round(Plotted_LFC, 2),
+                "<br>q-value:", formatC(q_value, format = "e", digits = 2),
+                "<br>Capped:", Is_Outlier
+            )
+        ),
+        width = 0.15, height = 0, alpha = 0.7
+    ) +
+
+    # Layer 2: Foreground KRAB (Significant / Large) - Plotted FIRST
+    geom_jitter(
+        data = df_fg_simple_krab,
+        aes(
+            x = x_manual, y = Plotted_LFC,
+            color = Legend_Label_Simple,
+            shape = Overlaid_Shape,
+            size = Overlaid_Size,
+            text = paste(
+                "Dataset:", Dataset,
+                "<br>GuideID:", GuideID,
+                "<br>Guide Type:", guide_type,
+                "<br>Significance:", Legend_Label_Simple,
+                "<br>Original Scaled Log2FC:", round(Scaled_Log2FC, 2),
+                "<br>Plotted Log2FC:", round(Plotted_LFC, 2),
+                "<br>q-value:", formatC(q_value, format = "e", digits = 2),
+                "<br>Capped:", Is_Outlier
+            )
+        ),
+        width = 0.15, height = 0, alpha = 0.7
+    ) +
+
+    # Layer 3: Foreground BE4max (Significant / Large) - Plotted ON TOP
+    geom_jitter(
+        data = df_fg_simple_be4max,
+        aes(
+            x = x_manual, y = Plotted_LFC,
+            color = Legend_Label_Simple,
+            shape = Overlaid_Shape,
+            size = Overlaid_Size,
+            text = paste(
+                "Dataset:", Dataset,
+                "<br>GuideID:", GuideID,
+                "<br>Guide Type:", guide_type,
+                "<br>Significance:", Legend_Label_Simple,
+                "<br>Original Scaled Log2FC:", round(Scaled_Log2FC, 2),
+                "<br>Plotted Log2FC:", round(Plotted_LFC, 2),
+                "<br>q-value:", formatC(q_value, format = "e", digits = 2),
+                "<br>Capped:", Is_Outlier
+            )
+        ),
+        width = 0.15, height = 0, alpha = 0.7
+    ) +
+    scale_color_manual(values = simple_colors) +
+
+    # Shape Logic: KRAB=16 (Circle), BE4max=15 (Square), Capped=17 (Triangle)
+    # Shape Logic: KRAB=16 (Circle), BE4max=17 (Triangle), Capped=15 (Square)
+    scale_shape_manual(values = c("KRAB" = 16, "BE4max" = 17, "Capped" = 15), guide = "none") +
+
+    # Size Logic: Large=2.5, Small=1.0
+    scale_size_manual(values = c("Large" = 2.5, "Small" = 1.0), guide = "none") +
+    scale_y_continuous(limits = c(-2.35, 2.35)) +
+    theme_classic() +
+    theme(
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank()
+    ) +
+    labs(
+        title = "Overlaid Proportion (KRAB=Black, BE4max=Blue, FDR < 0.01)",
+        x = "GuideID",
+        y = "Scaled Log2FC",
+        color = "Significance"
+    ) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey")
+
+plotly_simple <- ggplotly(p_simple, tooltip = "text")
+
+# Save Simplified Plot
+html_filename_simple <- file.path(output_dir, paste0("KRAB_BE4max_Overlaid_Simple_Colors_Plot", file_suffix, ".html"))
+print(paste("Attempting to save simplified plot to:", html_filename_simple))
+
+tryCatch(
+    {
+        saveWidget(plotly_simple, html_filename_simple, selfcontained = TRUE)
+        if (file.exists(html_filename_simple)) {
+            print(paste("SUCCESS: Simplified Plot created at", html_filename_simple))
+        } else {
+            print("WARNING: saveWidget ran without error, but simple file was NOT found.")
+        }
+    },
+    error = function(e) {
+        print(paste("ERROR saving simplified plot:", e$message))
+    }
+)
+```
+
+## Generate 4-Panel Vertically Aligned Combined Plot
+
+```{r four_panel_plot, fig.height=24, fig.width=12}
+# ==============================================================================
+# Goal: 4 Vertically Stacked Plots with PERTLY ALIGNED X-AXIS
+# 1. KRAB (Rainbow Color) - but sized/shaped by sig
+# 2. KRAB (Sig Color)
+# 3. BE4max (Sig Color)
+# 4. Overlaid (Sig Color)
+# ==============================================================================
+
+# 1. Prepare Base Data Sources
+# We can reuse 'overlaid_df' because it already calculates:
+# - x_manual (The critical alignment key)
+# - Overlaid_Size (Significance sizing)
+# - Overlaid_Shape (Dataset/Capped shapes)
+# - Legend_Label_Stouffer (Sig vs Grey coloring)
+
+# --- Panel 1: KRAB Rainbow ---
+# Filter for KRAB and force Color to be 'guide_type' (Original Rainbow)
+# BUT keep Size/Shape/X derived from significance logic
+df_p1 <- overlaid_df %>%
+    filter(Dataset == "KRAB") %>%
+    mutate(
+        Panel = "1. KRAB (All Data)",
+        # Use guide_type for color (Rainbow), NOT the Stouffer label
+        Plot_Color = guide_type
+    )
+
+# --- Panel 2: KRAB Significance ---
+# Filter for KRAB, use Stouffer coloring
+df_p2 <- overlaid_df %>%
+    filter(Dataset == "KRAB") %>%
+    mutate(
+        Panel = "2. KRAB (Significant)",
+        Plot_Color = Legend_Label_Stouffer
+    )
+
+# --- Panel 3: BE4max Significance ---
+# Filter for BE4max, use Stouffer coloring
+df_p3 <- overlaid_df %>%
+    filter(Dataset == "BE4max") %>%
+    mutate(
+        Panel = "3. BE4max (Significant)",
+        Plot_Color = Legend_Label_Stouffer
+    )
+
+# --- Panel 4: Overlaid Significance ---
+# Use ALL data, use Stouffer coloring
+df_p4 <- overlaid_df %>%
+    mutate(
+        Panel = "4. Combined Overlaid",
+        Plot_Color = Legend_Label_Stouffer
+    )
+
+# 2. Combine into One Master DF
+four_panel_df <- bind_rows(df_p1, df_p2, df_p3, df_p4)
+
+# 3. Enforce Factor Ordering for Vertical Stack
+# Top (1) -> Bottom (4)
+four_panel_df$Panel <- factor(four_panel_df$Panel, levels = c(
+    "1. KRAB (All Data)",
+    "2. KRAB (Significant)",
+    "3. BE4max (Significant)",
+    "4. Combined Overlaid"
+))
+
+# 4. Z-Ordering (Ensure Large/Sig points are ON TOP across all panels)
+four_panel_df <- four_panel_df %>%
+    arrange(Panel, factor(Overlaid_Size, levels = c("Small", "Large")))
+
+# Split for plotting
+df_4p_bg <- four_panel_df %>% filter(Overlaid_Size == "Small")
+df_4p_fg <- four_panel_df %>% filter(Overlaid_Size == "Large")
+
+# 5. Define Unified Color Palette
+# We need a palette that handles both:
+# - The "Stouffer" keys ("Not Significant", + specific significant types...)
+# - AND the "Rainbow" keys (All raw guide_types)
+# 'default_colors' already has all guide_types.
+# 'stouffer_colors' adds "Not Significant".
+# So 'stouffer_colors' is safe to use for EVERYTHING (since it's a superset).
+# (Panel 1 just won't use the "Not Significant" key).
+
+p_4panel <- ggplot() +
+    # Layer 1: Background
+    geom_jitter(
+        data = df_4p_bg,
+        aes(
+            x = x_manual, y = Plotted_LFC,
+            color = Plot_Color,
+            shape = Overlaid_Shape,
+            size = Overlaid_Size,
+            text = paste(
+                "Panel:", Panel,
+                "<br>GuideID:", GuideID,
+                "<br>Guide Type:", guide_type,
+                "<br>Color Group:", Plot_Color,
+                "<br>Original Scaled Log2FC:", round(Scaled_Log2FC, 2),
+                "<br>q-value:", formatC(q_value, format = "e", digits = 2)
+            )
+        ),
+        width = 0.15, height = 0, alpha = 0.7
+    ) +
+
+    # Layer 2: Foreground (On Top)
+    geom_jitter(
+        data = df_4p_fg,
+        aes(
+            x = x_manual, y = Plotted_LFC,
+            color = Plot_Color,
+            shape = Overlaid_Shape,
+            size = Overlaid_Size,
+            text = paste(
+                "Panel:", Panel,
+                "<br>GuideID:", GuideID,
+                "<br>Guide Type:", guide_type,
+                "<br>Color Group:", Plot_Color,
+                "<br>Original Scaled Log2FC:", round(Scaled_Log2FC, 2),
+                "<br>q-value:", formatC(q_value, format = "e", digits = 2)
+            )
+        ),
+        width = 0.15, height = 0, alpha = 0.7
+    ) +
+
+    # Facet Specification: 1 Column, Vertical Stack
+    facet_grid(Panel ~ .) +
+    scale_color_manual(values = stouffer_colors) +
+    scale_shape_manual(values = c("KRAB" = 16, "BE4max" = 17, "Capped" = 15), guide = "none") +
+    scale_size_manual(values = c("Large" = 2.5, "Small" = 1.0), guide = "none") +
+    scale_y_continuous(limits = c(-2.35, 2.35)) +
+    theme_classic() +
+    theme(
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        strip.background = element_blank(),
+        strip.text.y = element_text(size = 10, face = "bold", angle = 0, hjust = 0), # Horizontal labels for readability? Or vertical?
+        # User requested vertically stacked. Horizontal text on right side often easier to read for long titles.
+        # Let's keep rotated -90 or 0 depending on pref. 0 is easier to read.
+        legend.position = "right"
+    ) +
+    # Override strip text to -90 if standard
+    theme(strip.text.y = element_text(angle = -90)) +
+    labs(
+        title = "4-Panel Aligned Proportion (Stouffer's FDR < 0.01)",
+        x = "GuideID",
+        y = "Scaled Log2FC",
+        color = "Guide Type / Sig"
+    ) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey")
+
+plotly_4panel <- ggplotly(p_4panel, tooltip = "text")
+
+# Save 4-Panel Plot
+html_filename_4panel <- file.path(output_dir, paste0("KRAB_BE4max_4_Panel_Aligned_Plot", file_suffix, ".html"))
+print(paste("Attempting to save 4-panel plot to:", html_filename_4panel))
+
+tryCatch(
+    {
+        saveWidget(plotly_4panel, html_filename_4panel, selfcontained = TRUE)
+        if (file.exists(html_filename_4panel)) {
+            print(paste("SUCCESS: 4-Panel File created at", html_filename_4panel))
+        } else {
+            print("WARNING: saveWidget ran without error, but 4-panel file was NOT found.")
+        }
+    },
+    error = function(e) {
+        print(paste("ERROR saving 4-panel plot:", e$message))
+    }
+)
+```
+
+## Generate 4-Panel Vertically Aligned Plot (Smaller Points Variation)
+
+```{r four_panel_plot_small, fig.height=24, fig.width=12}
+# ==============================================================================
+# Goal: Same as above but with smaller Significant points (1.75 vs 2.5)
+# ==============================================================================
+
+# Use same dataframe 'four_panel_df'
+
+p_4panel_small <- ggplot() +
+    # Layer 1: Background
+    geom_jitter(
+        data = df_4p_bg,
+        aes(
+            x = x_manual, y = Plotted_LFC,
+            color = Plot_Color,
+            shape = Overlaid_Shape,
+            size = Overlaid_Size,
+            text = paste(
+                "Panel:", Panel,
+                "<br>GuideID:", GuideID,
+                "<br>Guide Type:", guide_type,
+                "<br>Color Group:", Plot_Color,
+                "<br>Original Scaled Log2FC:", round(Scaled_Log2FC, 2),
+                "<br>q-value:", formatC(q_value, format = "e", digits = 2)
+            )
+        ),
+        width = 0.15, height = 0, alpha = 0.7
+    ) +
+
+    # Layer 2: Foreground (On Top)
+    geom_jitter(
+        data = df_4p_fg,
+        aes(
+            x = x_manual, y = Plotted_LFC,
+            color = Plot_Color,
+            shape = Overlaid_Shape,
+            size = Overlaid_Size,
+            text = paste(
+                "Panel:", Panel,
+                "<br>GuideID:", GuideID,
+                "<br>Guide Type:", guide_type,
+                "<br>Color Group:", Plot_Color,
+                "<br>Original Scaled Log2FC:", round(Scaled_Log2FC, 2),
+                "<br>q-value:", formatC(q_value, format = "e", digits = 2)
+            )
+        ),
+        width = 0.15, height = 0, alpha = 0.7
+    ) +
+
+    # Facet Specification: 1 Column, Vertical Stack
+    facet_grid(Panel ~ .) +
+    scale_color_manual(values = stouffer_colors) +
+    scale_shape_manual(values = c("KRAB" = 16, "BE4max" = 17, "Capped" = 15), guide = "none") +
+    # VARIATION: Smaller Significant Points (1.75 instead of 2.5)
+    scale_size_manual(values = c("Large" = 1.75, "Small" = 1.0), guide = "none") +
+    scale_y_continuous(limits = c(-2.35, 2.35)) +
+    theme_classic() +
+    theme(
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        strip.background = element_blank(),
+        strip.text.y = element_text(size = 10, face = "bold", angle = -90),
+        legend.position = "right"
+    ) +
+    labs(
+        title = "4-Panel Aligned Proportion (Stouffer's FDR < 0.01) [Small Points]",
+        x = "GuideID",
+        y = "Scaled Log2FC",
+        color = "Guide Type / Sig"
+    ) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey")
+
+plotly_4panel_small <- ggplotly(p_4panel_small, tooltip = "text")
+
+# Save 4-Panel Plot (Small Variation)
+html_filename_4panel_small <- file.path(output_dir, paste0("KRAB_BE4max_4_Panel_Aligned_Plot_SmallPoints", file_suffix, ".html"))
+print(paste("Attempting to save small points plot to:", html_filename_4panel_small))
+
+tryCatch(
+    {
+        saveWidget(plotly_4panel_small, html_filename_4panel_small, selfcontained = TRUE)
+        if (file.exists(html_filename_4panel_small)) {
+            print(paste("SUCCESS: Small Points File created at", html_filename_4panel_small))
+        } else {
+            print("WARNING: saveWidget ran without error, but small points file was NOT found.")
+        }
+    },
+    error = function(e) {
+        print(paste("ERROR saving small points plot:", e$message))
+    }
+)
+```
+
+## Generate 4-Panel Vertically Aligned Plot (Simplified Colors + Small Points)
+
+```{r four_panel_plot_simple_small, fig.height=24, fig.width=12}
+# ==============================================================================
+# Goal: 4 Panels, but Panel 4 uses "Simplified Tuning" (Black/Blue)
+# AND uses Small Points (1.75)
+# ==============================================================================
+
+# 1. Modify Panel 4 Data to use Simplified Coloring Keys
+df_p4_simple <- df_p4 %>%
+    mutate(
+        # Override Plot_Color with Simple Keys
+        Plot_Color = case_when(
+            Legend_Label_Stouffer == "Not Significant" ~ "Not Significant",
+            Dataset == "KRAB" ~ "KRAB Significant",
+            Dataset == "BE4max" ~ "BE4max Significant"
+        )
+    )
+
+# 2. Re-combine Data
+# Panels 1-3 remain exactly the same as 'four_panel_df'
+# We only swap out the Panel 4 rows
+four_panel_df_simple <- bind_rows(df_p1, df_p2, df_p3, df_p4_simple)
+
+# 3. Enforce Factor Ordering
+four_panel_df_simple$Panel <- factor(four_panel_df_simple$Panel, levels = c(
+    "1. KRAB (All Data)",
+    "2. KRAB (Significant)",
+    "3. BE4max (Significant)",
+    "4. Combined Overlaid"
+))
+
+# 4. Z-Order Sort
+# Sort by Size (Small -> Large) THEN by Dataset (KRAB -> BE4max)
+# This ensures Large BE4max points are the very top layer
+four_panel_df_simple <- four_panel_df_simple %>%
+    mutate(Dataset = factor(Dataset, levels = c("KRAB", "BE4max"))) %>%
+    arrange(Panel, factor(Overlaid_Size, levels = c("Small", "Large")), Dataset)
+
+# Split
+df_4p_simple_bg <- four_panel_df_simple %>% filter(Overlaid_Size == "Small")
+df_4p_simple_fg_krab <- four_panel_df_simple %>% filter(Overlaid_Size == "Large" & Dataset == "KRAB")
+df_4p_simple_fg_be4max <- four_panel_df_simple %>% filter(Overlaid_Size == "Large" & Dataset == "BE4max")
+
+# 5. Define Extended Simple Palette
+# We need a palette that covers:
+# - Original Stouffer keys (Panel 2, 3)
+# - Rainbow keys (Panel 1)
+# - NEW Simple keys (Panel 4)
+
+# Start with our robust stouffer_colors (contains Rainbow + Not Sig + Sig Types)
+extended_colors <- stouffer_colors
+
+# Add the specific simple keys if they don't map naturally
+extended_colors["KRAB Significant"] <- "black"
+extended_colors["BE4max Significant"] <- "#1ABA22"
+
+# Note: "Not Significant" is already in stouffer_colors ("lightgrey")
+
+p_4panel_simple <- ggplot() +
+    # Layer 1: Background
+    geom_jitter(
+        data = df_4p_simple_bg,
+        aes(
+            x = x_manual, y = Plotted_LFC,
+            color = Plot_Color,
+            shape = Overlaid_Shape,
+            size = Overlaid_Size,
+            text = paste(
+                "Panel:", Panel,
+                "<br>GuideID:", GuideID,
+                "<br>Guide Type:", guide_type,
+                "<br>Color Group:", Plot_Color,
+                "<br>Original Scaled Log2FC:", round(Scaled_Log2FC, 2),
+                "<br>q-value:", formatC(q_value, format = "e", digits = 2)
+            )
+        ),
+        width = 0.15, height = 0, alpha = 0.7
+    ) +
+
+    # Layer 2: Foreground KRAB (On Top) - Plotted FIRST
+    geom_jitter(
+        data = df_4p_simple_fg_krab,
+        aes(
+            x = x_manual, y = Plotted_LFC,
+            color = Plot_Color,
+            shape = Overlaid_Shape,
+            size = Overlaid_Size,
+            text = paste(
+                "Panel:", Panel,
+                "<br>GuideID:", GuideID,
+                "<br>Guide Type:", guide_type,
+                "<br>Color Group:", Plot_Color,
+                "<br>Original Scaled Log2FC:", round(Scaled_Log2FC, 2),
+                "<br>q-value:", formatC(q_value, format = "e", digits = 2)
+            )
+        ),
+        width = 0.15, height = 0, alpha = 0.7
+    ) +
+
+    # Layer 3: Foreground BE4max (On Top of KRAB) - Plotted LAST
+    geom_jitter(
+        data = df_4p_simple_fg_be4max,
+        aes(
+            x = x_manual, y = Plotted_LFC,
+            color = Plot_Color,
+            shape = Overlaid_Shape,
+            size = Overlaid_Size,
+            text = paste(
+                "Panel:", Panel,
+                "<br>GuideID:", GuideID,
+                "<br>Guide Type:", guide_type,
+                "<br>Color Group:", Plot_Color,
+                "<br>Original Scaled Log2FC:", round(Scaled_Log2FC, 2),
+                "<br>q-value:", formatC(q_value, format = "e", digits = 2)
+            )
+        ),
+        width = 0.15, height = 0, alpha = 0.7
+    ) +
+
+    # Facet Stack
+    facet_grid(Panel ~ .) +
+    scale_color_manual(values = extended_colors) +
+    scale_shape_manual(values = c("KRAB" = 16, "BE4max" = 17, "Capped" = 15), guide = "none") +
+    # SMALL POINTS VARIATION (1.75)
+    scale_size_manual(values = c("Large" = 1.75, "Small" = 1.0), guide = "none") +
+    scale_y_continuous(limits = c(-2.35, 2.35)) +
+    theme_classic() +
+    theme(
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        strip.background = element_blank(),
+        strip.text.y = element_text(size = 10, face = "bold", angle = -90),
+        legend.position = "right"
+    ) +
+    labs(
+        title = "4-Panel Aligned (Simple Colors on Bottom) [Small Points]",
+        x = "GuideID",
+        y = "Scaled Log2FC",
+        color = "Guide Type / Sig"
+    ) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey")
+
+plotly_4panel_simple <- ggplotly(p_4panel_simple, tooltip = "text")
+
+# Save 4-Panel Plot (Simple + Small)
+html_filename_simple_small <- file.path(output_dir, paste0("KRAB_BE4max_4_Panel_Aligned_Plot_Simple_SmallPoints", file_suffix, ".html"))
+print(paste("Attempting to save simple small points plot to:", html_filename_simple_small))
+
+tryCatch(
+    {
+        saveWidget(plotly_4panel_simple, html_filename_simple_small, selfcontained = TRUE)
+        if (file.exists(html_filename_simple_small)) {
+            print(paste("SUCCESS: Simple Small Points File created at", html_filename_simple_small))
+        } else {
+            print("WARNING: saveWidget ran without error, but file was NOT found.")
+        }
+    },
+    error = function(e) {
+        print(paste("ERROR saving simple small points plot:", e$message))
+    }
+)
+```
+
+## Generate Static 4-Panel Plot for Paper (PDF/PNG, No Legend)
+
+```{r static_paper_plot, fig.height=6, fig.width=10}
+# ==============================================================================
+# Goal: Static Version of "Simple Colors + Small Points" for Paper
+# - No Legend
+# - No Interaction (text aesthetic removed)
+# - Saved as PDF and PNG
+# ==============================================================================
+
+print("Generating Static Paper Plot...")
+
+# Reuse the dataframes and colors from the previous chunk:
+# - df_4p_simple_bg
+# - df_4p_simple_fg_krab
+# - df_4p_simple_fg_be4max
+# - extended_colors
+
+p_static <- ggplot() +
+    # Layer 1: Background
+    geom_jitter(
+        data = df_4p_simple_bg,
+        aes(
+            x = x_manual, y = Plotted_LFC,
+            color = Plot_Color,
+            shape = Overlaid_Shape,
+            size = Overlaid_Size
+        ),
+        width = 0.15, height = 0, alpha = 0.7
+    ) +
+
+    # Layer 2: Foreground KRAB (On Top) - Plotted FIRST
+    geom_jitter(
+        data = df_4p_simple_fg_krab,
+        aes(
+            x = x_manual, y = Plotted_LFC,
+            color = Plot_Color,
+            shape = Overlaid_Shape,
+            size = Overlaid_Size
+        ),
+        width = 0.15, height = 0, alpha = 0.7
+    ) +
+
+    # Layer 3: Foreground BE4max (On Top of KRAB) - Plotted LAST
+    geom_jitter(
+        data = df_4p_simple_fg_be4max,
+        aes(
+            x = x_manual, y = Plotted_LFC,
+            color = Plot_Color,
+            shape = Overlaid_Shape,
+            size = Overlaid_Size
+        ),
+        width = 0.15, height = 0, alpha = 0.7
+    ) +
+
+    # Facet Specification: 1 Column, Vertical Stack
+    facet_grid(Panel ~ .) +
+    scale_color_manual(values = extended_colors) +
+    scale_shape_manual(values = c("KRAB" = 16, "BE4max" = 17, "Capped" = 15), guide = "none") +
+    # Adjusted Sizes: Large=2.5, Small=1.5
+    scale_size_manual(values = c("Large" = 2.5, "Small" = 1.5), guide = "none") +
+    scale_y_continuous(limits = c(-2.35, 2.35)) +
+    # Reduce white space on sides (Tight X-Axis)
+    scale_x_continuous(expand = c(0.005, 0.005)) +
+    theme_classic(base_size = 7) +
+    theme(
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        strip.background = element_blank(),
+        # Force every element to be exactly 7pt
+        plot.title = element_text(size = 7, face = "bold"),
+        axis.title = element_text(size = 7),
+        axis.text.y = element_text(size = 7),
+        strip.text.y = element_text(size = 7, face = "bold", angle = -90),
+        # NO LEGEND FOR PAPER
+        legend.position = "none"
+    ) +
+    labs(
+        title = "4-Panel Aligned Proportion (Static Paper Version)",
+        x = "GuideID",
+        y = "Scaled Log2FC"
+    ) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey")
+
+# Save as PDF
+pdf_filename <- file.path(output_dir, paste0("KRAB_BE4max_4_Panel_Static_Paper", file_suffix, ".pdf"))
+print(paste("Saving PDF to:", pdf_filename))
+ggsave(pdf_filename, plot = p_static, width = 6.3, height = 4.5, limitsize = FALSE)
+
+# Save as PNG
+png_filename <- file.path(output_dir, paste0("KRAB_BE4max_4_Panel_Static_Paper", file_suffix, ".png"))
+print(paste("Saving PNG to:", png_filename))
+ggsave(png_filename, plot = p_static, width = 6.3, height = 4.5, dpi = 300, limitsize = FALSE)
+
+print("Static plots saved successfully.")
+```
+
+## Generate Split Static Plots (AAVS1-only vs Main Figure)
+
+```{r split_static_plots}
+# ==============================================================================
+# Goal: Split p_static into two separate files with same Y-axis and format
+# 1. AAVS1 Only (Supplemental)
+# 2. Everything except AAVS1 (Main Fig)
+# ==============================================================================
+
+# 1. Define New Output Directories
+main_fig_dir <- "./outputs_stacked_jitter_plots/figures_for_paper"
+supp_fig_dir <- file.path(main_fig_dir, "Supplemental")
+
+if (!dir.exists(main_fig_dir)) dir.create(main_fig_dir, recursive = TRUE)
+if (!dir.exists(supp_fig_dir)) dir.create(supp_fig_dir, recursive = TRUE)
+
+# 2. Universal Plotting Dimensions and Font
+static_w <- 6.3
+static_h <- 4.5
+static_base_size <- 7
+
+# --- HELPER FUNCTION TO GENERATE PLOT ---
+# This ensures both plots have identical formatting and Y-axis
+generate_static_subset_plot <- function(data_bg, data_fg_krab, data_fg_be4max, title_text) {
+    ggplot() +
+        geom_jitter(
+            data = data_bg, width = 0.15, height = 0, alpha = 0.7,
+            aes(x = x_manual, y = Plotted_LFC, color = Plot_Color, shape = Overlaid_Shape, size = Overlaid_Size)
+        ) +
+        geom_jitter(
+            data = data_fg_krab, width = 0.15, height = 0, alpha = 0.7,
+            aes(x = x_manual, y = Plotted_LFC, color = Plot_Color, shape = Overlaid_Shape, size = Overlaid_Size)
+        ) +
+        geom_jitter(
+            data = data_fg_be4max, width = 0.15, height = 0, alpha = 0.7,
+            aes(x = x_manual, y = Plotted_LFC, color = Plot_Color, shape = Overlaid_Shape, size = Overlaid_Size)
+        ) +
+        facet_grid(Panel ~ .) +
+        scale_color_manual(values = extended_colors) +
+        scale_shape_manual(values = c("KRAB" = 16, "BE4max" = 17, "Capped" = 15), guide = "none") +
+        scale_size_manual(values = c("Large" = 2.5, "Small" = 1.5), guide = "none") +
+        scale_y_continuous(limits = c(-2.35, 2.35)) +
+        scale_x_continuous(expand = c(0.005, 0.005)) +
+        theme_classic(base_size = static_base_size) +
+        theme(
+            axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+            strip.background = element_blank(),
+            plot.title = element_text(size = static_base_size, face = "bold"),
+            axis.title = element_text(size = static_base_size),
+            axis.text.y = element_text(size = static_base_size),
+            strip.text.y = element_text(size = static_base_size, face = "bold", angle = -90),
+            legend.position = "none"
+        ) +
+        labs(title = title_text, x = "GuideID", y = "Scaled Log2FC") +
+        geom_hline(yintercept = 0, linetype = "dashed", color = "grey")
+}
+
+# 3. GENERATE AND SAVE PLOT 1: AAVS1 ONLY
+df_bg_aavs1 <- df_4p_simple_bg %>% filter(guide_type == "AAVS1_negative_control")
+df_krab_aavs1 <- df_4p_simple_fg_krab %>% filter(guide_type == "AAVS1_negative_control")
+df_be4max_aavs1 <- df_4p_simple_fg_be4max %>% filter(guide_type == "AAVS1_negative_control")
+
+p_aavs1_only <- generate_static_subset_plot(df_bg_aavs1, df_krab_aavs1, df_be4max_aavs1, "AAVS1 Controls Only")
+
+aavs1_pdf <- file.path(supp_fig_dir, "AAVS1_only_stacked_jitter_bottom_1.5_guides_removed.pdf")
+aavs1_png <- file.path(supp_fig_dir, "AAVS1_only_stacked_jitter_bottom_1.5_guides_removed.png")
+
+ggsave(aavs1_pdf, plot = p_aavs1_only, width = 1.1, height = static_h)
+ggsave(aavs1_png, plot = p_aavs1_only, width = 1.1, height = static_h, dpi = 300)
+
+# 4. GENERATE AND SAVE PLOT 2: ALL EXCEPT AAVS1
+df_bg_main <- df_4p_simple_bg %>% filter(guide_type != "AAVS1_negative_control")
+df_krab_main <- df_4p_simple_fg_krab %>% filter(guide_type != "AAVS1_negative_control")
+df_be4max_main <- df_4p_simple_fg_be4max %>% filter(guide_type != "AAVS1_negative_control")
+
+p_main_fig <- generate_static_subset_plot(df_bg_main, df_krab_main, df_be4max_main, "Main Figure (AAVS1 Removed)")
+
+main_pdf <- file.path(main_fig_dir, "final_main_fig_stacked_jitter_AAVS1_removed_bottom_1.5_guides_removed.pdf")
+main_png <- file.path(main_fig_dir, "final_main_fig_stacked_jitter_AAVS1_removed_bottom_1.5_guides_removed.png")
+
+ggsave(main_pdf, plot = p_main_fig, width = static_w, height = static_h)
+ggsave(main_png, plot = p_main_fig, width = static_w, height = static_h, dpi = 300)
+
+# 5. SAVE SECOND VERSION OF MAIN FIG (Supplemental, 5-inch width)
+supp_main_pdf <- file.path(supp_fig_dir, "AAVS1_removed_stacked_jitter_bottom_1.5_guides_removed.pdf")
+supp_main_png <- file.path(supp_fig_dir, "AAVS1_removed_stacked_jitter_bottom_1.5_guides_removed.png")
+
+ggsave(supp_main_pdf, plot = p_main_fig, width = 5.4, height = static_h)
+ggsave(supp_main_png, plot = p_main_fig, width = 5.4, height = static_h, dpi = 300)
+
+print("Split static plots generated and saved successfully.")
+```

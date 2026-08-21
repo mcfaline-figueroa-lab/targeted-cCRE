@@ -1,0 +1,424 @@
+---
+title: "Loop Plot Hi-C Data"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Loop Over All Hi-C Data Files
+
+```{r plot-hic-loop, fig.width=7, fig.height=6.5}
+library(plotgardener)
+
+# Override the boundary cutoff check to allow STON1 and other boundary labels to be drawn in small plots
+ns_pg <- asNamespace("plotgardener")
+unlockBinding("cutoffLabel", ns_pg)
+assign("cutoffLabel", function(df, fontsize, xscale, vp, unit) {
+    return(as.character(df[1]))
+}, envir = ns_pg)
+
+# Override textGrob inside the grid package namespace to force check.overlap = FALSE so overlapping labels print
+ns_grid <- asNamespace("grid")
+current_textGrob <- get("textGrob", envir = ns_grid)
+if (is.null(attr(current_textGrob, "original_fun"))) {
+    original_textGrob <- current_textGrob
+} else {
+    original_textGrob <- attr(current_textGrob, "original_fun")
+}
+override_textGrob <- function(...) {
+    args <- list(...)
+    args$check.overlap <- FALSE
+    do.call(original_textGrob, args)
+}
+attr(override_textGrob, "original_fun") <- original_textGrob
+unlockBinding("textGrob", ns_grid)
+assign("textGrob", override_textGrob, envir = ns_grid)
+
+# ==============================================================================
+# 1. Configuration & Directories
+# ==============================================================================
+# Load custom MANE select genome build
+library(GenomicFeatures)
+mane_gff_path <- "../data/STON1_locus/MANE.GRCh38.v1.5.refseq_genomic.gff.gz"
+if (!file.exists(mane_gff_path)) stop("MANE GFF file not found!")
+
+message("Loading MANE Select GFF database...")
+txdb_mane <- makeTxDbFromGFF(mane_gff_path, format = "gff")
+seqlevelsStyle(txdb_mane) <- "UCSC"
+
+# Create custom assembly pointing to the MANE Select database
+custom_assembly <- assembly(
+    Genome = "hg38_mane",
+    TxDb = txdb_mane,
+    OrgDb = "org.Hs.eg.db",
+    gene.id.column = "SYMBOL",
+    display.column = "SYMBOL"
+)
+
+# Genomic region of interest (~1.25 Mb)
+chrom <- "chr2"
+start_pos <- 47361610
+end_pos <- 48613291
+
+region_params <- pgParams(
+    chrom      = chrom,
+    chromstart = start_pos,
+    chromend   = end_pos,
+    assembly   = custom_assembly
+)
+
+# 2.2Mb region configuration (Approx 2Mb region with padding)
+start_pos_2Mb <- 46533132 - 100000
+end_pos_2Mb <- 48533132 + 100000
+
+region_params_2Mb <- pgParams(
+    chrom      = chrom,
+    chromstart = start_pos_2Mb,
+    chromend   = end_pos_2Mb,
+    assembly   = custom_assembly
+)
+
+# Input and output directories
+mcool_dir <- "../data/hi_c/mcool"
+
+# List all .mcool files in the RAW folder
+mcool_files <- list.files(path = mcool_dir, pattern = "\\.mcool$", full.names = TRUE)
+
+# CTCF BED data directory and files
+bed_dir <- "../data/hi_c/CTCF_data"
+bed_files <- list.files(path = bed_dir, pattern = "\\.bed$", full.names = TRUE)
+
+# ==============================================================================
+# Helper Function to Draw the Small Plot (no BED tracks, 7pt font, 2.08 x 3 in)
+# ==============================================================================
+draw_hic_plot_small <- function(mcool_path, sample_name, reg_params, s_pos, e_pos) {
+    # CRITICAL FIX: Comment out this line to stop the double-rendering haze!
+    # pageCreate(width = 3.0, height = 4.0, default.units = "inches", showGuides = FALSE)
+
+    # Ensure RColorBrewer is available
+    if (!requireNamespace("RColorBrewer", quietly = TRUE)) {
+        install.packages("RColorBrewer", repos = "https://cloud.r-project.org")
+    }
+
+    # Plot the Hi-C Triangle Heatmap (Width = 2.6, Height = 1.3)
+    hic_plot <- plotHicTriangle(
+        data = mcool_path,
+        params = reg_params,
+        resolution = 5000,
+        norm = "BALANCE", # Normalization method
+        x = 0.2,
+        y = 0.6,
+        width = 2.6,
+        height = 1.3,
+        zrange = c(0, 2000),
+        palette = colorRampPalette(RColorBrewer::brewer.pal(n = 9, "YlGnBu"))
+    )
+
+    # Add the sample title text (fontsize = 7)
+    plotText(
+        label = sample_name,
+        x = 1.5,
+        y = 0.35,
+        just = "center",
+        fontsize = 7,
+        fontface = "bold"
+    )
+
+    # Highlight genomic coordinate chr2:48530164 (up-left diagonal)
+    annoSegments(
+        plot = hic_plot,
+        x0 = 48530164,
+        y0 = 0,
+        x1 = (s_pos + 48530164) / 2,
+        y1 = (48530164 - s_pos) / (2 * 5000),
+        default.units = "native",
+        linecolor = "black",
+        lwd = 0.8,
+        lty = 2
+    )
+
+    # Highlight genomic coordinate chr2:47403156 (up-right diagonal)
+    annoSegments(
+        plot = hic_plot,
+        x0 = 47403156,
+        y0 = 0,
+        x1 = (e_pos + 47403156) / 2,
+        y1 = (e_pos - 47403156) / (2 * 5000),
+        default.units = "native",
+        linecolor = "black",
+        lwd = 0.8,
+        lty = 2
+    )
+
+    # Add the Genome Axis (fontsize = 7)
+    plotGenomeLabel(
+        params = reg_params,
+        x = 0.2,
+        y = 2.0,
+        length = 2.6,
+        fontsize = 7
+    )
+
+    # Two-pass gene track rendering to layer STON1 (blue) on top of STON1-GTF2A1L (grey):
+    # Pass 1: Plot all genes in grey with grey labels, except MSH2 which is blue (blue label)
+    gene_highlights_1 <- data.frame(
+        gene = "MSH2",
+        color = "black",
+        stringsAsFactors = FALSE
+    )
+    plotGenes(
+        params = reg_params,
+        x = 0.2,
+        y = 2.2,
+        width = 2.6,
+        height = 1.2,
+        fontsize = 1,
+        geneHighlights = gene_highlights_1,
+        geneBackground = "grey",
+        fontcolor = c("grey", "grey")
+    )
+
+    # Pass 2: Overplot STON1 in blue (blue label), with all other genes & labels transparent,
+    # and turn off strand labels to avoid duplicate drawing.
+    gene_highlights_2 <- data.frame(
+        gene = "STON1",
+        color = "black",
+        stringsAsFactors = FALSE
+    )
+    plotGenes(
+        params = reg_params,
+        x = 0.2,
+        y = 2.2,
+        width = 2.6,
+        height = 1.2,
+        fontsize = 1,
+        geneHighlights = gene_highlights_2,
+        geneBackground = "#00000000",
+        fontcolor = c("#00000000", "#00000000"),
+        strandLabels = FALSE
+    )
+}
+
+# ==============================================================================
+# 2. Loop for Small 2.2Mb Region (Fixed Viewport Alignment)
+# ==============================================================================
+output_dir_small <- "./outputs_hic_analysis/final_paper_approx_2Mb_hi_c_plots_small"
+
+if (!dir.exists(output_dir_small)) {
+    dir.create(output_dir_small, showWarnings = FALSE, recursive = TRUE)
+}
+
+# Ensure the ragg package is available for crisp, vibrant PNGs
+if (!requireNamespace("ragg", quietly = TRUE)) {
+    install.packages("ragg", repos = "https://cloud.r-project.org")
+}
+
+for (mcool_path in mcool_files) {
+    filename <- basename(mcool_path)
+    sample_name <- gsub("-Arima-allReps-filtered\\.mcool$", "", filename)
+
+    pdf_path <- file.path(output_dir_small, paste0(sample_name, ".pdf"))
+    png_path <- file.path(output_dir_small, paste0(sample_name, ".png"))
+
+    message(paste("Processing clean-vector small plots for:", sample_name))
+
+    # 1. Save to Clean Vector PDF
+    cairo_pdf(pdf_path, width = 3, height = 4)
+    # Initialize the plotgardener page EXACTLY once on top of the Cairo engine canvas
+    pageCreate(width = 3.0, height = 4.0, default.units = "inches", showGuides = FALSE)
+    draw_hic_plot_small(mcool_path, sample_name, region_params_2Mb, start_pos_2Mb, end_pos_2Mb)
+    dev.off()
+
+    # 2. Save to Matched PNG via ragg
+    ragg::agg_png(png_path, width = 3, height = 4, units = "in", res = 300, background = "white")
+    # Initialize the plotgardener page EXACTLY once on top of the AGG engine canvas
+    pageCreate(width = 3.0, height = 4.0, default.units = "inches", showGuides = FALSE)
+    draw_hic_plot_small(mcool_path, sample_name, region_params_2Mb, start_pos_2Mb, end_pos_2Mb)
+    dev.off()
+}
+```
+
+# ==============================================================================
+# 3. Loop for Small 2.2Mb Region with Knight-Ruiz (BALANCE) Rasterized Normalization
+# ==============================================================================
+
+## Loop for Small 2.2Mb Region with Knight-Ruiz (BALANCE) Rasterized Normalization
+
+```{r plot-hic-loop-small-rasterized, fig.width=3, fig.height=4}
+# ==============================================================================
+# 6. Loop for Small 2.2Mb Region with Knight-Ruiz (BALANCE) Rasterized Normalization
+# ==============================================================================
+output_dir_small_rasterized <- "./outputs_hic_analysis/final_paper_approx_2Mb_hi_c_plots_small/FINAL_PLOTS_RASTERIZED"
+
+# Create output directory if it doesn't exist
+if (!dir.exists(output_dir_small_rasterized)) {
+    dir.create(output_dir_small_rasterized, showWarnings = FALSE, recursive = TRUE)
+}
+
+# ==============================================================================
+# Helper Function specifically for BALANCE normalization with self-contained rasterization
+# ==============================================================================
+draw_hic_plot_small_rasterized <- function(mcool_path, sample_name, reg_params, s_pos, e_pos) {
+    # Ensure png library is available
+    if (!requireNamespace("png", quietly = TRUE)) {
+        install.packages("png", repos = "https://cloud.r-project.org")
+    }
+
+    # 1. Generate the rasterized heatmap and annotation lines on a temporary PNG device
+    tmp_png <- tempfile(fileext = ".png")
+
+    # Open transparent background PNG device at page size and 600 DPI
+    png(tmp_png, width = 3.0, height = 4.0, units = "in", res = 600, bg = "transparent")
+
+    # Initialize the page layout on the PNG device
+    pageCreate(width = 3.0, height = 4.0, default.units = "inches", showGuides = FALSE)
+
+    # Plot the Hi-C Triangle Heatmap natively onto the PNG canvas
+    hic_plot <- plotHicTriangle(
+        data = mcool_path,
+        params = reg_params,
+        resolution = 5000,
+        norm = "BALANCE", # Normalization method
+        x = 0.2,
+        y = 0.6,
+        width = 2.6,
+        height = 1.3,
+        zrange = c(0, 50),
+        palette = colorRampPalette(c("white", "red")),
+        draw = TRUE
+    )
+
+    # Highlight genomic coordinate chr2:48530164 (up-left diagonal) - rendered to PNG
+    annoSegments(
+        plot = hic_plot,
+        x0 = 48530164,
+        y0 = 0,
+        x1 = (s_pos + 48530164) / 2,
+        y1 = (48530164 - s_pos) / (2 * 5000),
+        default.units = "native",
+        linecolor = "black",
+        lwd = 0.8,
+        lty = 2
+    )
+
+    # Highlight genomic coordinate chr2:47403156 (up-right diagonal) - rendered to PNG
+    annoSegments(
+        plot = hic_plot,
+        x0 = 47403156,
+        y0 = 0,
+        x1 = (e_pos + 47403156) / 2,
+        y1 = (e_pos - 47403156) / (2 * 5000),
+        default.units = "native",
+        linecolor = "black",
+        lwd = 0.8,
+        lty = 2
+    )
+    dev.off()
+
+    # Read the transparent PNG back in
+    img <- png::readPNG(tmp_png)
+
+    # Create a rasterGrob covering the entire page using NPC coordinates
+    # This centers the raster exactly on the page, completely avoiding
+    # any reversed y-axis or unit conversion direction issues in the viewport.
+    hic_raster <- grid::rasterGrob(img,
+        x = 0.5,
+        y = 0.5,
+        width = 1.0,
+        height = 1.0,
+        just = "center",
+        default.units = "npc"
+    )
+
+    # 2. Draw everything to the main active device (PDF or PNG)
+    # Initialize the main canvas page
+    pageCreate(width = 3.0, height = 4.0, default.units = "inches", showGuides = FALSE)
+
+    # Draw the rasterized Hi-C heatmap and annotation lines onto the main page
+    grid::grid.draw(hic_raster)
+
+    # Add the sample title text (fontsize = 7)
+    plotText(
+        label = sample_name,
+        x = 1.5,
+        y = 0.35,
+        just = "center",
+        fontsize = 7,
+        fontface = "bold"
+    )
+
+    # Add the Genome Axis (fontsize = 7)
+    plotGenomeLabel(
+        params = reg_params,
+        x = 0.2,
+        y = 2.0,
+        length = 2.6,
+        fontsize = 7
+    )
+
+    # Two-pass gene track rendering to layer STON1 (black) on top of STON1-GTF2A1L (grey):
+    # Pass 1: Plot all genes in grey with grey labels, except MSH2 which is black (black label)
+    gene_highlights_1 <- data.frame(
+        gene = "MSH2",
+        color = "black",
+        stringsAsFactors = FALSE
+    )
+    plotGenes(
+        params = reg_params,
+        x = 0.2,
+        y = 2.2,
+        width = 2.6,
+        height = 1.2,
+        fontsize = 1,
+        geneHighlights = gene_highlights_1,
+        geneBackground = "grey",
+        fontcolor = c("grey", "grey")
+    )
+
+    # Pass 2: Overplot STON1 in black (black label), with all other genes & labels transparent,
+    # and turn off strand labels to avoid duplicate drawing.
+    gene_highlights_2 <- data.frame(
+        gene = "STON1",
+        color = "black",
+        stringsAsFactors = FALSE
+    )
+    plotGenes(
+        params = reg_params,
+        x = 0.2,
+        y = 2.2,
+        width = 2.6,
+        height = 1.2,
+        fontsize = 1,
+        geneHighlights = gene_highlights_2,
+        geneBackground = "#00000000",
+        fontcolor = c("#00000000", "#00000000"),
+        strandLabels = FALSE
+    )
+}
+
+# Run the loop to generate the new BALANCE-normalized rasterized plots
+for (mcool_path in mcool_files) {
+    # Extract file basename and the sample name
+    filename <- basename(mcool_path)
+    sample_name <- gsub("-Arima-allReps-filtered\\.mcool$", "", filename)
+
+    # Paths
+    pdf_path <- file.path(output_dir_small_rasterized, paste0(sample_name, ".pdf"))
+    png_path <- file.path(output_dir_small_rasterized, paste0(sample_name, ".png"))
+
+    # Print status message
+    message(paste("Processing BALANCE-normalized RASTERIZED small 2.2Mb region plots for:", sample_name))
+
+    # 1. Save to PDF (width = 3, height = 4)
+    pdf(pdf_path, width = 3, height = 4)
+    draw_hic_plot_small_rasterized(mcool_path, sample_name, region_params_2Mb, start_pos_2Mb, end_pos_2Mb)
+    dev.off()
+
+    # 2. Save to PNG (width = 3, height = 4 with 300 DPI resolution)
+    png(png_path, width = 3, height = 4, units = "in", res = 300)
+    draw_hic_plot_small_rasterized(mcool_path, sample_name, region_params_2Mb, start_pos_2Mb, end_pos_2Mb)
+    dev.off()
+}
+```

@@ -1,0 +1,692 @@
+---
+title: "STON1 Locus Figure - All ATAC Tracks"
+output: html_document
+date: "2026-02-13"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## STON1 Locus Visualization
+
+This script generates a plot for the region **chr2:48,528,591-48,531,995**, highlighting the **STON1** gene and displaying ATAC-seq data from multiple conditions.
+
+### Configuration
+
+```{r config}
+# ==============================================================================
+# 0. Load Libraries
+# ==============================================================================
+suppressPackageStartupMessages({
+    library(viridis)
+    library(Gviz)
+    library(rtracklayer)
+    library(GenomicFeatures)
+    library(org.Hs.eg.db)
+    library(grid)
+
+    # Safety check for BSgenome package
+    has_bsgenome <- requireNamespace("BSgenome.Hsapiens.UCSC.hg38", quietly = TRUE)
+    if (has_bsgenome) {
+        library(BSgenome.Hsapiens.UCSC.hg38)
+        Hsapiens <- BSgenome.Hsapiens.UCSC.hg38
+    } else {
+        message("Notice: 'BSgenome.Hsapiens.UCSC.hg38' not found. Sequence track will be skipped.")
+        Hsapiens <- NULL
+    }
+})
+
+# ==============================================================================
+# 1. Configuration
+# ==============================================================================
+
+# Paths
+mane_gff_path <- "../data/STON1_locus/MANE.GRCh38.v1.5.refseq_genomic.gff.gz"
+
+bw_dir <- "../data/STON1_locus/bigwig"
+if (!dir.exists(bw_dir)) {
+    bw_dir <- "/Users/annaschoonen/Documents/AS_CGL_lab_sequencing_data_backup/broadpeaks_ATAC_nextflow_v3_12_1_22_nfcore_outputs_w_bigwig/bwa/mergedReplicate/bigwig"
+}
+
+output_dir <- "./outputs_STON1_locus/"
+
+# Ensure output directory exists
+if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+}
+
+# Target Gene to Highlight (Red)
+HIGHLIGHT_GENES <- c("STON1")
+
+# Region of Interest (Specific coordinates provided)
+chrom <- "chr2"
+start_pos <- 48528591
+end_pos <- 48531995
+region_gr <- GRanges(chrom, IRanges(start_pos, end_pos))
+
+# Genome Build
+gen <- "hg38"
+
+# ==============================================================================
+# 2. Data Preparation
+# ==============================================================================
+
+# 2.1 Load Gene Annotation (TxDb)
+if (!file.exists(mane_gff_path)) stop("MANE GFF file not found!")
+message("Loading TxDb...")
+txdb_mane <- makeTxDbFromGFF(mane_gff_path, format = "gff")
+seqlevelsStyle(txdb_mane) <- "UCSC"
+
+# 2.2 Identify BigWig Files
+# List all bigWigs in the directory
+all_bws <- list.files(bw_dir, pattern = "\\.bigWig$", full.names = TRUE)
+# Construct a named vector for easy access
+names(all_bws) <- basename(all_bws)
+# Strip GEO sample prefix if present
+names(all_bws) <- sub("^GSM[0-9]+_", "", names(all_bws))
+
+# Define plotting order/colors if desired
+# Sorting manually or logically can help plot readability
+# Example order based on filename logic (Time -> Dose)
+# 48hr: 0, 10, 50, 100
+# 96hr: 0, 10, 50, 100
+ordered_names <- c(
+    "96hr_0.mRp.clN.bigWig", "96hr_100.mRp.clN.bigWig"
+)
+
+# Filter essentially ensures we only use existing files
+plot_bws <- all_bws[ordered_names]
+plot_bws <- plot_bws[!is.na(plot_bws)] # Remove missing if any
+```
+
+### Helper Functions (Gene Model Construction)
+
+These helpers construct the gene model tracks (UTR vs CDS logic) similar to the reference script.
+
+```{r helpers}
+# ==============================================================================
+# 3. Create Tracks
+# ==============================================================================
+
+# 3.1 Gene Track (Expanded View, Standard Gviz)
+# ------------------------------------------------------------------------------
+# We use the TxDb directly.
+# Gviz automatically handles CDS/UTR if the TxDb has that info (makeTxDbFromGFF does).
+message("Creating Gene Track...")
+
+gene_track <- GeneRegionTrack(txdb_mane,
+    genome = gen, chromosome = chrom, start = start_pos, end = end_pos,
+    name = "Genes",
+    transcriptAnnotation = "group",
+    showId = TRUE, # Force display of labels
+    geneSymbols = TRUE, # Use the symbol column
+    just.group = "left", # Anchor labels to the left edge of features in-window
+    stacking = "full", # Full view (avoid collapsing)
+    collapseTranscripts = FALSE, # Show all transcripts
+    # Visuals
+    fill = "black", col = "black", # Black color as requested
+    fontcolor.group = "black", fontsize.group = 12,
+    background.title = "transparent", col.title = "black",
+    thinBoxFeature = c("UTR", "ncRNA", "utr", "3'UTR", "5'UTR"), # Ensure UTRs are thin
+    col.line = "black",
+    rotation.title = 0 # Rotate label to be horizontal
+)
+
+# 3.2 Map Symbols (Entrez -> Symbol)
+# ------------------------------------------------------------------------------
+# Gviz TxDb tracks use Entrez IDs/Gene IDs by default in the "gene" column.
+# We need to map them to Symbols for "transcriptAnnotation='symbol'" to work nicely.
+if (length(ranges(gene_track)) > 0) {
+    # Extract existing gene IDs (Entrez from GFF)
+    # The 'gene' column in Gviz ranges usually holds the Gene ID
+    gids <- gene(gene_track)
+
+    # Remove "GeneID:" prefix if present (NCBI GFFs often have this)
+    clean_gids <- gsub("^GeneID:", "", gids)
+
+    # Identify unique IDs to map
+    to_map <- unique(clean_gids[!is.na(clean_gids)])
+
+    if (length(to_map) > 0) {
+        # Map to Symbol using org.Hs.eg.db
+        sym_map <- tryCatch(
+            {
+                suppressMessages(mapIds(org.Hs.eg.db,
+                    keys = to_map,
+                    column = "SYMBOL",
+                    keytype = "ENTREZID",
+                    multiVals = "first"
+                ))
+            },
+            error = function(e) {
+                return(NULL)
+            }
+        )
+
+        # Create a mapping vector
+        if (!is.null(sym_map)) {
+            # Map the clean_gids vector
+            # Matches
+            mapped_syms <- sym_map[clean_gids]
+
+            # Fill NAs with original ID
+            mapped_syms[is.na(mapped_syms)] <- clean_gids[is.na(mapped_syms)]
+
+            # Update the track's group column (more reliable for labeling)
+            ranges(gene_track)$group <- mapped_syms
+            # Also update symbol for good measure
+            ranges(gene_track)$symbol <- mapped_syms
+        } else {
+            # If sym_map is NULL, at least use the original IDs
+            ranges(gene_track)$group <- clean_gids
+            ranges(gene_track)$symbol <- clean_gids
+        }
+    } else {
+        # No IDs to map, use whatever is there
+        ranges(gene_track)$group <- clean_gids
+        ranges(gene_track)$symbol <- clean_gids
+    }
+} else {
+    warning("No transcripts found in this region.")
+}
+
+
+# 3.3 Data Tracks (ATAC-seq)
+# ------------------------------------------------------------------------------
+data_tracks <- list()
+
+# 1. Calculate Global Y-Max for minimal/consistent scaling
+# Iterate through all files first to find the maximum score in the region
+message("Calculating Global Y-Max...")
+max_scores <- numeric(length(plot_bws))
+i <- 1
+for (bw_path in plot_bws) {
+    imported_dat <- import.bw(bw_path, selection = region_gr)
+    if (length(imported_dat) > 0) {
+        max_scores[i] <- max(score(imported_dat))
+    } else {
+        max_scores[i] <- 0
+    }
+    i <- i + 1
+}
+
+# Add a 5% buffer to the global max
+global_ymax <- max(max_scores) * 1.05
+# Ensure a reasonable minimum if all are 0
+if (global_ymax == 0) global_ymax <- 10
+
+message(paste("Global Y-Max set to:", round(global_ymax, 2)))
+
+# 2. Create Tracks
+for (bw_name in names(plot_bws)) {
+    bw_path <- plot_bws[[bw_name]]
+
+    # Clean Name for Display (remove .mRp.clN.bigWig)
+    disp_name <- sub(".mRp.clN.bigWig", "", bw_name)
+    disp_name <- gsub("_", " ", disp_name) # e.g. "96hr 0"
+
+    dt <- DataTrack(
+        range = bw_path, genome = gen, type = "histogram",
+        chromosome = chrom, name = disp_name,
+        ylim = c(0, global_ymax), # Use Global Max
+        col.histogram = "#8C8C8C", fill.histogram = "#8C8C8C", # Changed from blue to #8C8C8C
+        background.title = "transparent",
+        col.title = "black", fontcolor.title = "black", cex.title = 0.6,
+        col.axis = "black", fontcolor.axis = "black", cex.axis = 0.5,
+        margin = 2, innerMargin = 2,
+        showTitle = TRUE
+    )
+
+    data_tracks[[bw_name]] <- dt
+}
+
+
+# 3.4 Genome Axis
+# ------------------------------------------------------------------------------
+strack <- GenomeAxisTrack(scale = 0.1, labelPos = "above", showTitle = FALSE, col = "grey50", fontcolor = "grey50", fontsize = 9, lwd = 1)
+
+
+# 3.5 External BigBed Track (A172 DNase-seq)
+# ------------------------------------------------------------------------------
+dnase_path <- "../data/STON1_locus/A172_DNase-seq_ENCFF101TNF.bigBed"
+dnase_track <- NULL
+
+if (file.exists(dnase_path)) {
+    message("Importing DNase-seq BigBed...")
+    # Import specific to region to avoid loading huge files
+    dnase_gr <- import(dnase_path, which = region_gr)
+
+    dnase_track <- AnnotationTrack(
+        range = dnase_gr, genome = gen, chromosome = chrom,
+        name = "A172 DNase-seq",
+        shape = "box", fill = "#B66DFF", col = "transparent", # Changed to lavender/purple
+        background.title = "transparent",
+        col.title = "black", fontcolor.title = "black", cex.title = 0.5,
+        rotation.title = 0
+    )
+} else {
+    warning("DNase-seq BigBed file not found at: ", dnase_path)
+}
+
+
+# 3.6 Additional Tracks (Footprints, CpG, M059J)
+# ------------------------------------------------------------------------------
+# Define Paths
+fp_path <- "../data/STON1_locus/A172_footprints_ENCFF569FQB_DNase-seq_rep2_deeper_seq.bigBed"
+fp2_path <- "../data/STON1_locus/A172_footprints_ENCFF643SRJ_DNase-seq_rep1_low_seq_depth.bigBed"
+cpg_path <- "../data/STON1_locus/CpG_Islands_UCSC_hg38.bed"
+m059j_path <- "../data/STON1_locus/M059J_DNase-seq_ENCFF742DKA.bigBed"
+ATAC_seq_peak_path <- "../data/STON1_locus/3_12_26_all_peaks_FINAL_for_genomic_browser.bed"
+be4_hits_path <- "../03_TMZ_survival_screen/outputs_stacked_jitter_plots/final_bed_files_stouffers_significant_sgRNA_hits_for_IGV_type_plots/BE4max_STON1_significant_hits_bottom_1.5percent_sgRNAs_removed.bed"
+krab_hits_path <- "../03_TMZ_survival_screen/outputs_stacked_jitter_plots/final_bed_files_stouffers_significant_sgRNA_hits_for_IGV_type_plots/KRAB_STON1_significant_hits_bottom_1.5percent_sgRNAs_removed.bed"
+
+# Track definitions
+fp_track <- NULL
+fp2_track <- NULL
+cpg_track <- NULL
+m059j_track <- NULL
+atac_peaks_track <- NULL
+be4_hits_track <- NULL
+krab_hits_track <- NULL
+
+# 1. A172 Footprints (BigBed)
+if (file.exists(fp_path)) {
+    message("Importing A172 Footprints 1...")
+    fp_gr <- import(fp_path, which = region_gr)
+    fp_track <- AnnotationTrack(
+        range = fp_gr, genome = gen, chromosome = chrom,
+        name = "A172 Footprints 1",
+        shape = "box", fill = "#B66DFF", col = "transparent",
+        background.title = "transparent",
+        col.title = "black", fontcolor.title = "black", cex.title = 0.5,
+        rotation.title = 0
+    )
+}
+
+if (file.exists(fp2_path)) {
+    message("Importing A172 Footprints 2...")
+    fp2_gr <- import(fp2_path, which = region_gr)
+    fp2_track <- AnnotationTrack(
+        range = fp2_gr, genome = gen, chromosome = chrom,
+        name = "A172 Footprints 2",
+        shape = "box", fill = "#B66DFF", col = "transparent",
+        background.title = "transparent",
+        col.title = "black", fontcolor.title = "black", cex.title = 0.5,
+        rotation.title = 0
+    )
+}
+
+# 1.1 BE4max Hits (BED)
+if (file.exists(be4_hits_path)) {
+    message("Importing BE4max Hits...")
+    be4_gr <- import(be4_hits_path)
+    be4_gr <- subsetByOverlaps(be4_gr, region_gr)
+    if (length(be4_gr) > 0) {
+        be4_hits_track <- AnnotationTrack(
+            range = be4_gr, genome = gen, chromosome = chrom,
+            name = "BE4max Hits",
+            shape = "box", fill = "#FF1493", col = "transparent",
+            background.title = "transparent",
+            col.title = "black", fontcolor.title = "black", cex.title = 0.5,
+            rotation.title = 0
+        )
+    }
+}
+
+# 1.2 KRAB Hits (BED)
+if (file.exists(krab_hits_path)) {
+    message("Importing KRAB Hits...")
+    krab_gr <- import(krab_hits_path)
+    krab_gr <- subsetByOverlaps(krab_gr, region_gr)
+    if (length(krab_gr) > 0) {
+        krab_hits_track <- AnnotationTrack(
+            range = krab_gr, genome = gen, chromosome = chrom,
+            name = "KRAB Hits",
+            shape = "box", fill = "#FF1493", col = "transparent",
+            background.title = "transparent",
+            col.title = "black", fontcolor.title = "black", cex.title = 0.5,
+            rotation.title = 0
+        )
+    }
+}
+
+# 2. CpG Islands (BED)
+if (file.exists(cpg_path)) {
+    message("Importing CpG Islands...")
+    # BED extraction: read fully then subset (safer for generic BEDs)
+    # If it's huge, this might be slow, but CpG tracks usually aren't massive.
+    # Alternatively, use a connection if possible, but standard import is safer.
+    cpg_gr <- import(cpg_path)
+    cpg_gr <- subsetByOverlaps(cpg_gr, region_gr)
+
+    if (length(cpg_gr) > 0) {
+        cpg_track <- AnnotationTrack(
+            range = cpg_gr, genome = gen, chromosome = chrom,
+            name = "CpG Islands",
+            shape = "box", fill = "#24FF24", col = "transparent", # Changed to requested green
+            background.title = "transparent",
+            col.title = "black", fontcolor.title = "black", cex.title = 0.5,
+            rotation.title = 0
+        )
+    } else {
+        # Create empty track to avoid errors/missing placeholder?
+        # Or just skip. User probably wants to see it if it exists.
+        # We'll skip if empty but print message.
+        message("No CpG islands in this region.")
+    }
+} else {
+    warning("CpG file not found: ", cpg_path)
+}
+
+# 2.5 A172 ATAC-seq Peaks (BED)
+if (file.exists(ATAC_seq_peak_path)) {
+    message("Importing A172 ATAC-seq Peaks...")
+    peaks_gr <- import(ATAC_seq_peak_path)
+    peaks_gr <- subsetByOverlaps(peaks_gr, region_gr)
+
+    if (length(peaks_gr) > 0) {
+        atac_peaks_track <- AnnotationTrack(
+            range = peaks_gr, genome = gen, chromosome = chrom,
+            name = "A172 ATAC-seq",
+            shape = "box", fill = "#8C8C8C", col = "transparent", # Changed from darkred to #8C8C8C
+            background.title = "transparent",
+            col.title = "black", fontcolor.title = "black", cex.title = 0.5,
+            rotation.title = 0
+        )
+    } else {
+        message("No ATAC-seq peaks in this region.")
+    }
+} else {
+    warning("ATAC-seq peak file not found: ", ATAC_seq_peak_path)
+}
+
+# 3.5 Sequence Track (for Zooming)
+seq_track <- NULL
+if (!is.null(Hsapiens)) {
+    seq_track <- SequenceTrack(Hsapiens, genome = gen)
+}
+
+# 3.6 M059J DNase-seq (BigBed)
+if (file.exists(m059j_path)) {
+    message("Importing M059J DNase-seq...")
+    m059j_gr <- import(m059j_path, which = region_gr)
+    m059j_track <- AnnotationTrack(
+        range = m059j_gr, genome = gen, chromosome = chrom,
+        name = "M059J DNase-seq",
+        shape = "box", fill = "#6DB6FF", col = "transparent", # Changed to requested blue
+        background.title = "transparent",
+        col.title = "black", fontcolor.title = "black", cex.title = 0.5,
+        rotation.title = 0
+    )
+} else {
+    warning("M059J file not found: ", m059j_path)
+}
+
+
+# 3.7 Consensus Patient Tracks (Primary & Recurrent)
+# ------------------------------------------------------------------------------
+# Helper: Construct Matrix
+construct_matrix <- function(files, region) {
+    if (length(files) == 0) {
+        return(NULL)
+    }
+    mat_list <- lapply(files, function(f) {
+        gr <- import(f, format = "BED")
+        seqlevelsStyle(gr) <- "UCSC" # Ensure consistent styling
+
+        # Calculate coverage for the chromosome
+        cov_rle <- coverage(gr)[[as.character(seqnames(region))]]
+
+        # Extract the ROI window
+        # Coverage Rle might be shorter than chromosome end, so window safely
+        # Ensure we don't go out of bounds
+        max_len <- length(cov_rle)
+        reg_start <- start(region)
+        reg_end <- min(end(region), max_len)
+
+        if (reg_start > max_len) {
+            # Region is entirely outside chromosome coverage?
+            return(rep(0, width(region)))
+        }
+
+        sig <- as.numeric(window(cov_rle, start = reg_start, end = reg_end))
+
+        # Pad if window was truncated
+        if (length(sig) < width(region)) {
+            sig <- c(sig, rep(0, width(region) - length(sig)))
+        }
+
+        # Binary Peak logic (1 if peak present, 0 otherwise)
+        return(ifelse(sig > 0, 1, 0))
+    })
+    return(do.call(rbind, mat_list))
+}
+
+patient_bed_dir <- "../data/patient_data"
+if (!dir.exists(patient_bed_dir)) {
+    patient_bed_dir <- "/Users/annaschoonen/Documents/JMF_lab_project/patient_data/Wang_2022/scATAC_patient_data/download_GEO_GSE174554"
+}
+all_bed_files <- list.files(patient_bed_dir, pattern = "_properly_formatted\\.bed$", full.names = TRUE)
+
+primary_files <- grep("Primary", all_bed_files, value = TRUE)
+recurrent_files <- grep("Recurrent", all_bed_files, value = TRUE)
+
+dt_p_con <- NULL
+dt_r_con <- NULL
+
+primary_consensus <- NULL
+if (length(primary_files) > 0) {
+    message("Building Primary Consensus...")
+    primary_mat <- construct_matrix(primary_files, region_gr)
+    if (!is.null(primary_mat)) {
+        primary_consensus <- colSums(primary_mat)
+    }
+}
+
+recurrent_consensus <- NULL
+if (length(recurrent_files) > 0) {
+    message("Building Recurrent Consensus...")
+    recurrent_mat <- construct_matrix(recurrent_files, region_gr)
+    if (!is.null(recurrent_mat)) {
+        recurrent_consensus <- colSums(recurrent_mat)
+    }
+}
+
+# Determine global max for consistent scaling across both tracks
+max_p <- if (!is.null(primary_consensus)) max(primary_consensus) else 0
+max_r <- if (!is.null(recurrent_consensus)) max(recurrent_consensus) else 0
+global_max_consensus <- max(max_p, max_r)
+if (global_max_consensus == 0) global_max_consensus <- 1
+
+# Generate heatmap gradient: 0 is white, 1 to max are viridis colors
+# Generate a discrete-looking heatmap gradient
+# This ensures 0 is obviously white and integers 1-Max map exactly to viridis colors
+v_colors <- viridis::viridis(global_max_consensus)
+heatmap_gradient <- c("#FFFFFF", "#FFFFFF", rep(v_colors, each = 2))[1:(2 * global_max_consensus + 1)]
+
+if (!is.null(primary_consensus)) {
+    dt_p_con <- DataTrack(
+        data = primary_consensus,
+        start = start_pos:end_pos, width = 1,
+        name = "Primary Consensus",
+        type = c("heatmap", "histogram"), # Histogram adds the Y-axis (values)
+        genome = gen, chromosome = chrom,
+        ylim = c(0, global_max_consensus), # Consistent max scale
+        yTicksAt = c(0, global_max_consensus), # Labels for min and max only
+        gradient = heatmap_gradient, separator = 0,
+
+        # Histogram settings (invisible, just for axis)
+        col.histogram = "transparent", fill.histogram = "transparent",
+
+        # Axis settings
+        showAxis = TRUE, cex.axis = 0.45, col.axis = "black", fontcolor.axis = "black",
+        background.title = "transparent",
+        col.title = "black", fontcolor.title = "black", cex.title = 0.6,
+        rotation.title = 0
+    )
+}
+
+if (!is.null(recurrent_consensus)) {
+    dt_r_con <- DataTrack(
+        data = recurrent_consensus,
+        start = start_pos:end_pos, width = 1,
+        name = "Recurrent Consensus",
+        type = c("heatmap", "histogram"),
+        genome = gen, chromosome = chrom,
+        ylim = c(0, global_max_consensus), # Consistent max scale
+        yTicksAt = c(0, global_max_consensus), # Labels for min and max only
+        gradient = heatmap_gradient, separator = 0,
+
+        # Histogram settings (invisible, just for axis)
+        col.histogram = "transparent", fill.histogram = "transparent",
+
+        # Axis settings
+        showAxis = TRUE, cex.axis = 0.45, col.axis = "black", fontcolor.axis = "black",
+        background.title = "transparent",
+        col.title = "black", fontcolor.title = "black", cex.title = 0.6,
+        rotation.title = 0
+    )
+}
+
+
+# ==============================================================================
+# 4. Plotting
+# ==============================================================================
+
+# Assemble Final List
+# Stacking Order: Axis -> Data Tracks -> Gene Track -> CpG -> DNase -> Footprints -> M059J -> Consensus(Pri, Rec)
+final_list <- list(strack)
+final_list <- c(final_list, data_tracks) # Add all 8 data tracks
+final_list <- c(final_list, list(gene_track))
+if (!is.null(cpg_track)) final_list <- c(final_list, list(cpg_track))
+if (!is.null(atac_peaks_track)) final_list <- c(final_list, list(atac_peaks_track))
+if (!is.null(dnase_track)) final_list <- c(final_list, list(dnase_track))
+if (!is.null(fp_track)) final_list <- c(final_list, list(fp_track))
+if (!is.null(fp2_track)) final_list <- c(final_list, list(fp2_track))
+if (!is.null(m059j_track)) final_list <- c(final_list, list(m059j_track))
+if (!is.null(krab_hits_track)) final_list <- c(final_list, list(krab_hits_track))
+if (!is.null(be4_hits_track)) final_list <- c(final_list, list(be4_hits_track))
+if (!is.null(dt_p_con)) final_list <- c(final_list, list(dt_p_con))
+if (!is.null(dt_p_con) && !is.null(dt_r_con)) {
+    gap_track <- AnnotationTrack(start = start_pos, end = end_pos, chromosome = chrom, genome = gen, name = " ", col = "transparent", fill = "transparent", col.line = "transparent", showTitle = FALSE, background.title = "transparent", background.panel = "transparent", col.border.title = "transparent", col.frame = "transparent", separator = 0)
+    final_list <- c(final_list, list(gap_track))
+}
+if (!is.null(dt_r_con)) final_list <- c(final_list, list(dt_r_con))
+
+# Define Sizes
+h_scale <- 0.6
+h_data <- 1.0
+h_gene <- 0.5
+h_annot <- 0.5 # Default for annotations
+h_annot_small <- 0.25 # Half height for specific BED tracks
+h_cons <- 0.35 # Consensus heatmap height
+h_gap <- 0.15 # Spacer height
+
+# Calculate sizes vector
+sizes_vec <- c(h_scale, rep(h_data, length(data_tracks)), h_gene)
+
+if (!is.null(cpg_track)) sizes_vec <- c(sizes_vec, h_annot_small)
+if (!is.null(atac_peaks_track)) sizes_vec <- c(sizes_vec, h_annot_small)
+if (!is.null(dnase_track)) sizes_vec <- c(sizes_vec, h_annot_small)
+if (!is.null(fp_track)) sizes_vec <- c(sizes_vec, h_annot_small)
+if (!is.null(fp2_track)) sizes_vec <- c(sizes_vec, h_annot_small)
+if (!is.null(m059j_track)) sizes_vec <- c(sizes_vec, h_annot_small)
+if (!is.null(krab_hits_track)) sizes_vec <- c(sizes_vec, h_annot)
+if (!is.null(be4_hits_track)) sizes_vec <- c(sizes_vec, h_annot_small)
+if (!is.null(dt_p_con)) sizes_vec <- c(sizes_vec, h_cons)
+if (!is.null(dt_p_con) && !is.null(dt_r_con)) sizes_vec <- c(sizes_vec, h_gap)
+if (!is.null(dt_r_con)) sizes_vec <- c(sizes_vec, h_cons)
+
+total_height <- sum(sizes_vec)
+
+
+# 4.1 Save PDF
+fname_pdf <- paste0(output_dir, "STON1_Locus_All_Tracks.pdf")
+pdf(fname_pdf, width = 7, height = total_height)
+
+plotTracks(final_list,
+    from = start_pos, to = end_pos, chromosome = chrom,
+    main = "STON1 Locus (chr2:48528591-48531995)", cex.main = 1, margin = 40, col.main = "black",
+    sizes = sizes_vec, title.width = 2.2
+)
+dev.off()
+message(paste("Saved PDF:", fname_pdf))
+
+# 4.2 Save PNG
+fname_png <- paste0(output_dir, "STON1_Locus_All_Tracks.png")
+png(fname_png, width = 8, height = total_height, units = "in", res = 300)
+
+plotTracks(final_list,
+    from = start_pos, to = end_pos, chromosome = chrom,
+    main = "STON1 Locus (chr2:48528591-48531995)", cex.main = 1, margin = 40, col.main = "black",
+    sizes = sizes_vec, title.width = 2.2
+)
+dev.off()
+message(paste("Saved PNG:", fname_png))
+```
+
+
+# ==============================================================================
+# 6. Zoomed Visualization (chr2:48530144-48530175)
+# ==============================================================================
+
+```{r zoom_visualization}
+# 6.1 Define Zoom Region and Sizing
+zoom_start <- 48530144
+zoom_end <- 48530175
+zoom_main <- "STON1 Locus - Zoom (chr2:48530144-48530175)"
+h_seq <- 0.25 # Height for sequence track
+
+message("Generating Zoomed Plots with Sequence Track...")
+
+# 6.2 Assemble Zoom Track List (Heatmap Version)
+# Order: Axis -> Sequence -> BigWigs -> Genes -> Hits -> CpG -> Peaks -> DNase -> FP -> M059J -> Heatmaps
+final_list_zoom <- list(strack)
+if (!is.null(seq_track)) final_list_zoom <- c(final_list_zoom, list(seq_track))
+final_list_zoom <- c(final_list_zoom, data_tracks)
+final_list_zoom <- c(final_list_zoom, list(gene_track))
+if (!is.null(cpg_track)) final_list_zoom <- c(final_list_zoom, list(cpg_track))
+if (!is.null(atac_peaks_track)) final_list_zoom <- c(final_list_zoom, list(atac_peaks_track))
+if (!is.null(dnase_track)) final_list_zoom <- c(final_list_zoom, list(dnase_track))
+if (!is.null(fp_track)) final_list_zoom <- c(final_list_zoom, list(fp_track))
+if (!is.null(fp2_track)) final_list_zoom <- c(final_list_zoom, list(fp2_track))
+if (!is.null(m059j_track)) final_list_zoom <- c(final_list_zoom, list(m059j_track))
+if (!is.null(krab_hits_track)) final_list_zoom <- c(final_list_zoom, list(krab_hits_track))
+if (!is.null(be4_hits_track)) final_list_zoom <- c(final_list_zoom, list(be4_hits_track))
+
+# Calculate Zoom Sizes (Heatmap)
+sizes_vec_zoom <- c(h_scale)
+if (!is.null(seq_track)) sizes_vec_zoom <- c(sizes_vec_zoom, h_seq)
+sizes_vec_zoom <- c(sizes_vec_zoom, rep(h_data, length(data_tracks)), h_gene)
+if (!is.null(cpg_track)) sizes_vec_zoom <- c(sizes_vec_zoom, h_annot_small)
+if (!is.null(atac_peaks_track)) sizes_vec_zoom <- c(sizes_vec_zoom, h_annot_small)
+if (!is.null(dnase_track)) sizes_vec_zoom <- c(sizes_vec_zoom, h_annot_small)
+if (!is.null(fp_track)) sizes_vec_zoom <- c(sizes_vec_zoom, h_annot_small)
+if (!is.null(fp2_track)) sizes_vec_zoom <- c(sizes_vec_zoom, h_annot_small)
+if (!is.null(m059j_track)) sizes_vec_zoom <- c(sizes_vec_zoom, h_annot_small)
+if (!is.null(krab_hits_track)) sizes_vec_zoom <- c(sizes_vec_zoom, h_annot)
+if (!is.null(be4_hits_track)) sizes_vec_zoom <- c(sizes_vec_zoom, h_annot_small)
+
+total_height_zoom <- sum(sizes_vec_zoom)
+
+# 6.3 Save Zoom Heatmap
+fname_zoom_heatmap_pdf <- paste0(output_dir, "STON1_Locus_Zoom_Heatmap.pdf")
+pdf(fname_zoom_heatmap_pdf, width = 7, height = total_height_zoom)
+plotTracks(final_list_zoom,
+    from = zoom_start, to = zoom_end, chromosome = chrom,
+    main = zoom_main, cex.main = 1, margin = 40, col.main = "black",
+    sizes = sizes_vec_zoom, title.width = 2.2
+)
+dev.off()
+
+fname_zoom_heatmap_png <- paste0(output_dir, "STON1_Locus_Zoom_Heatmap.png")
+png(fname_zoom_heatmap_png, width = 8, height = total_height_zoom, units = "in", res = 300)
+plotTracks(final_list_zoom,
+    from = zoom_start, to = zoom_end, chromosome = chrom,
+    main = zoom_main, cex.main = 1, margin = 40, col.main = "black",
+    sizes = sizes_vec_zoom, title.width = 2.2
+)
+dev.off()
+
+```

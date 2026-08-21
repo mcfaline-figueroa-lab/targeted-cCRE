@@ -1,0 +1,471 @@
+---
+title: "Aim2_MSH2_CRE_analysis"
+output: html_document
+date: "2024-07-26"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+suppressPackageStartupMessages({
+  library(tidyr)
+  library(readr)
+  library(dplyr)
+  library(ggplot2)
+  library(stringr)
+  library(monocle3)
+})
+```
+
+## Initializing CDS Object
+```{r}
+cds.pre <- readRDS("../data/targeted_cCRE_2/GSM9825203_targeted_cCRE_2_cDNA_cds_precell_prehash.RDS")
+
+cds_coldata_df <- colData(cds.pre) %>% as.data.frame()
+dim(cds_coldata_df)
+```
+
+
+
+```{r}
+# knee plot for UMIs, visualizing cutoff at 12
+# horizontal line is at log10(12), i.e. n.umi = 12, matching the UMI cutoff below
+
+# ggrastr::rasterise() rasterizes only the points at 600 DPI;
+# all text, axes, hline, and title remain as editable vectors in the PDF
+umi_knee_plot <- ggplot(cds_coldata_df %>% arrange(desc(n.umi)) %>% mutate(cell_rank = dplyr::row_number()), aes(x = log10(cell_rank), y = log10(n.umi))) +
+  geom_hline(size = 0.2, yintercept = log10(12)) + # input what n.umi you want to cutoff for visualization
+  ggrastr::rasterise(geom_point(size = 0.5, stroke = 0), dpi = 600) +
+  monocle3:::monocle_theme_opts() +
+  scale_y_continuous(breaks = c(1, 2, 3, 4, 5)) +
+  xlab("Log10 CellRank") +
+  ylab("Log10 UMI") +
+  theme(
+    legend.position = "bottom",
+    legend.key.width = unit(1, "line"),
+    legend.key.height = unit(0.2, "line"),
+    text = element_text(size = 6)
+  )
+
+# print for notebook display (unchanged)
+print(umi_knee_plot)
+
+# save PDF copy for paper figures (2in wide, 7pt fonts, rasterized points)
+umi_knee_plot_paper <- umi_knee_plot +
+  theme(text = element_text(size = 7))
+
+output_dir <- "./outputs/"
+dir.create(file.path(output_dir, "cds_knee_plots"), showWarnings = FALSE, recursive = TRUE)
+
+ggsave(
+  filename = file.path(output_dir, "cds_knee_plots/targeted_cCRE_2_knee_plot.pdf"),
+  plot     = umi_knee_plot_paper,
+  width    = 2,
+  height   = 2,
+  units    = "in",
+  device   = cairo_pdf
+)
+
+rm(umi_knee_plot_paper, knee_plot_sample_title)
+```
+
+
+```{r}
+cds.pre <- cds.pre[, colData(cds.pre)$n.umi >= 12]
+dim(cds.pre)
+```
+
+
+```{r}
+cols <- colData(cds.pre) %>%
+  as.data.frame() %>%
+  mutate(cell_ID = Cell) %>%
+  tidyr::separate(col = Cell, into = c("P7", "P5", NA, NA, "n1", NA, NA, "n2"), sep = "_") %>%
+  mutate(RT = paste("RT_BC_", n1, sep = "")) %>%
+  mutate(Lig = paste("Lig_BC_", n2, sep = "")) %>%
+  select(-n1, -n2)
+```
+
+
+
+## Merging Hash Data into CDS
+
+```{r}
+hash_table <- read.table("../data/targeted_cCRE_2/GSM9825205_targeted_cCRE_2_hashTable.out.txt.gz", col.names = c("sample", "cell_ID", "oligo", "hash_umis"))
+```
+
+
+Calculate Hash Proportions and Top-to-Second-Best Ratios. 
+Note: Single-hash cells are assigned a default ratio of 500 to pass subsequent ratio filters.
+
+```{r}
+hash_table_summary_raw <- hash_table %>%
+  group_by(cell_ID) %>%
+  mutate(proportion = hash_umis / sum(hash_umis), total_hash_umis_per_cell_ID = sum(hash_umis)) %>%
+  arrange(desc(proportion)) %>%
+  mutate(rank = row_number()) %>%
+  dplyr::filter(rank %in% c(1, 2)) %>%
+  mutate(top_to_second_best_ratio = ifelse(sum(rank) > 1, proportion[rank == 1] / proportion[rank == 2], 500)) %>%
+  dplyr::filter(rank == 1)
+
+hash_table_summary_raw
+
+unique(hash_table_summary_raw$rank)
+
+
+mean(hash_table_summary_raw$hash_umis)
+median(hash_table_summary_raw$hash_umis)
+```
+
+```{r}
+# Filter the hashTable data frame to keep only rows that have a hash_umis value of 4 or more
+filtered_hash_table <- hash_table_summary_raw %>%
+  filter(hash_umis >= 4)
+```
+
+Filter `hash_table_summary` based on `top_to_second_best_ratio` threshold.
+```{r}
+# Filter the hashTable_summary data frame to keep only rows that meet the threshold
+hash_table_summary <- filtered_hash_table %>%
+  filter(top_to_second_best_ratio >= 2)
+```
+
+```{r}
+# Load the tidyverse package
+library(tidyverse)
+
+
+# Duplicate the oligo column
+hash_table_summary <- hash_table_summary %>%
+  mutate(oligo_temp = oligo)
+
+# Split the oligo_temp column
+hash_table_summary <- hash_table_summary %>%
+  separate(oligo_temp, into = c("cell_line_part1", "cell_line_part2", "dose", "other1", "drug", "well_ID"), sep = "_") %>%
+  mutate(
+    cell_line = paste(cell_line_part1, cell_line_part2, sep = "_"),
+    dose = as.numeric(dose)
+  ) %>%
+  select(-other1, -cell_line_part2, -cell_line_part1)
+```
+
+```{r}
+# Convert tibble to dataframe
+hash_table_summary <- as.data.frame(hash_table_summary)
+```
+
+Merge pre-hash CDS with processed hash information.
+```{r}
+dim(cols)
+
+cols <- cols %>%
+  left_join(hash_table_summary, by = c("cell_ID" = "cell_ID", "sample" = "sample")) %>%
+  select(-Size_Factor, -proportion, -rank)
+
+dim(cols) # Verify dimensions to ensure no rows are lost
+```
+
+
+```{r}
+rownames(cols) <- cols$cell_ID
+```
+
+```{r}
+# Assign cols dataframe as colData(cds)
+colData(cds.pre) <- DataFrame(cols)
+```
+
+```{r}
+# Add columns for log10(n.umi) and % mito
+colData(cds.pre)$log10.umi <- colData(cds.pre)$n.umi %>% log10()
+
+mt_genes <- rowData(cds.pre) %>%
+  as.data.frame() %>%
+  filter(grepl("^MT-", gene_short_name) == TRUE)
+
+mt_genes_id <- rownames(mt_genes)
+colData(cds.pre)$percent_mito <- 100 * (colSums(exprs(cds.pre)[mt_genes_id, ]) / colSums(exprs(cds.pre)))
+```
+
+```{r}
+cds_w_hash_df <- colData(cds.pre) %>% as.data.frame()
+```
+
+Quantify cells missing hash assignments.
+```{r}
+# Count rows with NA in the hash_umis column
+na_count_hash <- cds_w_hash_df %>%
+  filter(is.na(hash_umis))
+
+na_count_hash
+```
+
+Calculate percentage of unassigned cells.
+```{r}
+nrow(na_count_hash) / nrow(cds_w_hash_df) * 100
+
+nrow(cds_w_hash_df) - nrow(na_count_hash)
+```
+
+
+## Processing CROP-seq sgRNA Data
+
+```{r}
+# Read in crop table
+cropTable <- read.table("../data/targeted_cCRE_2/GSM9825204_targeted_cCRE_2_CROPTable.out.txt.gz", col.names = c("sample", "cell_ID", "sgRNA", "axis", "reads"))
+
+arrange(cropTable, desc(reads))
+```
+
+```{r}
+length(unique(cropTable$cell_ID))
+```
+
+
+
+
+Parse `cell_ID` to extract P7 and P5 indices for filtering.
+
+```{r}
+cropTable <- cropTable %>%
+  mutate(
+    split_parts = str_split(cell_ID, "_"),
+    P7 = sapply(split_parts, `[`, 1),
+    P5 = sapply(split_parts, `[`, 2)
+  ) %>%
+  select(-split_parts)
+```
+
+
+```{r}
+unique(cropTable$P7)
+```
+
+```{r}
+length(unique(cropTable$sgRNA))
+```
+
+Filter for relevant P7 indices corresponding to the target sequencing run.
+```{r}
+cropTable_real_P7s <- cropTable %>%
+  filter(P7 %in% c("01A", "01B", "01D", "01E"))
+```
+
+
+Process CROP dataframe and map valid P7 indices.
+```{r}
+cropTable_mapped <- cropTable_real_P7s
+
+cropTable_mapped <- cropTable_mapped %>%
+  mutate(new_cell = case_when(
+    grepl("01A", cell_ID) ~ gsub("01A", "03", cell_ID),
+    grepl("01B", cell_ID) ~ gsub("01B", "04", cell_ID),
+    grepl("01D", cell_ID) ~ gsub("01D", "05", cell_ID),
+    grepl("01E", cell_ID) ~ gsub("01E", "06", cell_ID),
+    TRUE ~ cell_ID
+  ))
+```
+
+
+```{r}
+cds_w_hash <- cds.pre
+```
+
+Standardize cell IDs by stripping the 3rd character from the P7 prefix.
+```{r}
+colData(cds_w_hash)$new_cell <- gsub("^(.{2})(.)(.*)$", "\\1\\3", colData(cds_w_hash)$cell_ID)
+```
+```{r}
+unique(colData(cds_w_hash)$P7)
+```
+
+Initialize `cds_w_hash_filtered` for downstream merging.
+```{r}
+cds_w_hash_filtered <- cds_w_hash
+```
+```{r}
+unique(colData(cds_w_hash_filtered)$P7)
+```
+
+
+```{r}
+cds_hash_filtered_df <- colData(cds_w_hash_filtered) %>% as.data.frame()
+```
+
+Quantify cells missing hash assignments.
+```{r}
+# Count rows with NA in the hash_umis column
+na_count_hash <- cds_hash_filtered_df %>%
+  filter(is.na(hash_umis))
+
+na_count_hash
+
+# Calculate the percent of cells in the CDS that lack a hash assignment
+nrow(na_count_hash) / nrow(cds_hash_filtered_df) * 100
+```
+
+
+Filter `cropTable` to retain only cells present in the CDS.
+```{r}
+crop_mapped_cds_intersect <- cropTable_mapped
+crop_mapped_cds_intersect <- crop_mapped_cds_intersect[crop_mapped_cds_intersect$new_cell %in% colData(cds_w_hash_filtered)$new_cell, ]
+
+
+dim(crop_mapped_cds_intersect)
+```
+
+Check unique cell IDs present in CDS with an assigned CROP sgRNA.
+```{r}
+length(unique(crop_mapped_cds_intersect$cell_ID))
+```
+```{r}
+length(unique(crop_mapped_cds_intersect$sgRNA))
+```
+
+
+Calculate sgRNA proportions and top-to-second-best Ratios. 
+Single sgRNA cells receive a default ratio of 100 to pass subsequent ratio filters.
+
+```{r}
+dim(crop_mapped_cds_intersect)
+
+
+cropTable_summary_raw <- crop_mapped_cds_intersect %>%
+  group_by(new_cell) %>%
+  mutate(sgRNA_proportion = reads / sum(reads), total_sgrna_read_per_cell = sum(reads)) %>%
+  dplyr::arrange(desc(sgRNA_proportion)) %>%
+  mutate(rank = row_number()) %>%
+  dplyr::filter(rank %in% c(1, 2)) %>%
+  mutate(sgRNA_top_to_second_best_ratio = ifelse(sum(rank) > 1, sgRNA_proportion[rank == 1] / sgRNA_proportion[rank == 2], 100)) %>%
+  dplyr::filter(rank == 1)
+```
+
+
+```{r}
+# Filter for cells with 2 or more reads (UMIs)
+cropTable_filtered_reads <- cropTable_summary_raw %>%
+  filter(reads >= 2)
+```
+
+
+Assign final CROP summary table.
+```{r}
+cropTable_summary <- cropTable_filtered_reads
+```
+
+
+
+
+
+
+Merge CROP data with hash-annotated CDS.
+```{r}
+cols_CDS_hash <- colData(cds_w_hash_filtered) %>% as.data.frame()
+```
+```{r}
+cols_merge_CROP <- cols_CDS_hash %>%
+  left_join(cropTable_summary, by = c("new_cell" = "new_cell", "sample" = "sample"))
+```
+
+Use `cell_ID.x` as row name because it matches the CDS expression matrix.
+```{r}
+rownames(cols_merge_CROP) <- cols_merge_CROP$cell_ID.x
+```
+
+```{r}
+head(rownames(cols_merge_CROP))
+```
+
+
+Verify row name alignment.
+```{r}
+identical(colnames(cds_w_hash_filtered), row.names(cols_merge_CROP))
+```
+
+
+```{r}
+# Assign cols data frame as colData(cds)
+colData(cds_w_hash_filtered) <- DataFrame(cols_merge_CROP)
+```
+
+```{r}
+head(exprs(cds_w_hash_filtered))
+```
+
+
+```{r}
+print(dim(cds_w_hash_filtered))
+print(dim(cds_w_hash_filtered[, !is.na(colData(cds_w_hash_filtered)$sgRNA)])) # Cells with an sgRNA assignment
+```
+
+Quantify percentage of cells with successful CROP assignment.
+```{r}
+cds_hash_crop_df <- colData(cds_w_hash_filtered) %>% as.data.frame()
+no_NA_CROP <- cds_hash_crop_df %>%
+  filter(!is.na(sgRNA))
+
+no_NA_CROP
+
+nrow(no_NA_CROP) / nrow(cds_hash_crop_df) * 100
+```
+
+
+
+```{r}
+# Remove cells from CDS that lack a CROP assignment
+condition_to_exclude_NA <- is.na(colData(cds_w_hash_filtered)$sgRNA)
+
+cds_crop_assigned <- cds_w_hash_filtered[, !condition_to_exclude_NA]
+```
+
+```{r}
+# Remove cells from CDS that lack a HASH assignment
+condition_to_exclude_HASH_NA <- is.na(colData(cds_crop_assigned)$oligo)
+
+cds_final <- cds_crop_assigned[, !condition_to_exclude_HASH_NA]
+
+cds_final_df <- colData(cds_final) %>% as.data.frame()
+cds_final_df
+
+
+nrow(colData(cds_crop_assigned)) - nrow(cds_final_df)
+```
+
+
+```{r}
+# UMI for cDNA
+median(cds_final_df$n.umi)
+mean(cds_final_df$n.umi)
+
+# Hash UMI
+median(cds_final_df$hash_umis)
+mean(cds_final_df$hash_umis)
+
+# crop umi (aka reads)
+median(cds_final_df$reads)
+mean(cds_final_df$reads)
+
+# Number of unique sgRNAs
+length(unique(cds_final_df$sgRNA))
+```
+
+
+
+```{r}
+saveRDS(cds_final, "./outputs/targeted_cCRE_2_final.RDS")
+```
+
+
+
+```{r}
+dim(cds_final)
+```
+
+
+
+
+
+

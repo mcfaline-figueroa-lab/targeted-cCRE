@@ -1,0 +1,234 @@
+---
+title: "DAS Regions Visualization (8 BigWigs)"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## DAS Regions Visualization
+
+This script generates genomic visualizations for multiple regions on **chr2**, including all 8 ATAC-seq BigWig tracks, MANE transcripts, and differentially accessible sites (DAS).
+
+### Configuration
+
+```{r config}
+# ==============================================================================
+# 0. Load Libraries
+# ==============================================================================
+suppressPackageStartupMessages({
+    library(Gviz)
+    library(rtracklayer)
+    library(GenomicFeatures)
+    library(org.Hs.eg.db)
+    library(grid)
+})
+
+# ==============================================================================
+# 1. Configuration
+# ==============================================================================
+
+# Paths
+mane_gff_path <- "../data/MANE/MANE.GRCh38.v1.5.refseq_genomic.gff.gz"
+bw_dir <- "../data/A172_GBM_ATAC_seq/"
+das_bed_path <- "./outputs/ATAC_analysis/FINAL_bed_files_for_genome_browser_3_12_26/3_12_26_diff_accessible_peaks_FINAL_for_genomic_browser.bed"
+output_dir <- "./outputs/DAS_regions_8_bigwigs_visualization/"
+
+# Ensure output directory exists
+if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+}
+
+# Regions of Interest
+regions <- list(
+    list(chrom = "chr2", start = 46849098, end = 46851200),
+    list(chrom = "chr2", start = 47309762, end = 47311566),
+    list(chrom = "chr2", start = 48420157, end = 48423896),
+    list(chrom = "chr2", start = 47198713, end = 47199943),
+    list(chrom = "chr2", start = 46812235, end = 46813356),
+    list(chrom = "chr2", start = 47360933, end = 47361364)
+)
+
+# Genome Build
+gen <- "hg38"
+```
+
+### Data Preparation (Static)
+
+```{r data_prep}
+# 1. Load Gene Annotation (TxDb)
+if (!file.exists(mane_gff_path)) stop("MANE GFF file not found!")
+message("Loading TxDb...")
+txdb_mane <- makeTxDbFromGFF(mane_gff_path, format = "gff")
+seqlevelsStyle(txdb_mane) <- "UCSC"
+
+# 2. Define BigWig Files
+bw_files <- c(
+    "48hr_0.mRp.clN.bigWig", "48hr_10.mRp.clN.bigWig", "48hr_50.mRp.clN.bigWig", "48hr_100.mRp.clN.bigWig",
+    "96hr_0.mRp.clN.bigWig", "96hr_10.mRp.clN.bigWig", "96hr_50.mRp.clN.bigWig", "96hr_100.mRp.clN.bigWig"
+)
+
+# 3. Load DAS Peaks (BED)
+if (file.exists(das_bed_path)) {
+    all_das_peaks_gr <- import(das_bed_path)
+} else {
+    stop("DAS BED file not found!")
+}
+```
+
+### Visualization Loop
+
+```{r visualization, fig.width=3, fig.height=4}
+for (reg in regions) {
+    chrom <- reg$chrom
+    start_pos <- reg$start
+    end_pos <- reg$end
+    region_gr <- GRanges(chrom, IRanges(start_pos, end_pos))
+    plot_title <- paste0(chrom, ":", start_pos, "-", end_pos)
+
+    message(paste("Processing region:", plot_title))
+
+    # 1. Genome Axis Track
+    strack <- GenomeAxisTrack(scale = 0.1, labelPos = "above", showTitle = FALSE, col = "grey50", fontcolor = "grey50", fontsize = 7, lwd = 1)
+
+    # 2. BigWig Data Tracks
+    max_scores <- sapply(bw_files, function(f) {
+        f_path <- file.path(bw_dir, paste0("GSM9825200_", f))
+        if (file.exists(f_path)) {
+            imported_bw <- import.bw(f_path, selection = region_gr)
+            if (length(imported_bw) > 0) {
+                return(max(score(imported_bw)))
+            }
+        }
+        return(0)
+    })
+    global_ymax <- max(max_scores) * 1.05
+    tick_interval <- if (global_ymax <= 3) 1 else 2
+
+    bw_tracks <- lapply(bw_files, function(f) {
+        f_path <- file.path(bw_dir, paste0("GSM9825200_", f))
+        track_name <- gsub(".mRp.clN.bigWig", "", f)
+        track_name <- gsub("_", " ", track_name)
+
+        DataTrack(
+            range = f_path, genome = gen, type = "histogram",
+            chromosome = chrom, name = track_name,
+            ylim = c(0, global_ymax),
+            yTicksAt = seq(0, floor(global_ymax), by = tick_interval),
+            col.histogram = "#8C8C8C", fill.histogram = "#8C8C8C",
+            background.title = "transparent",
+            background.panel = "transparent",
+            col.frame = "transparent",
+            col.title = "black", fontcolor.title = "black", fontsize.title = 7, cex.title = 1, fontface.title = 1,
+            col.axis = "black", fontcolor.axis = "black", fontsize.axis = 7, cex.axis = 6 / 7, fontface.axis = 1,
+            margin = 1, innerMargin = 0,
+            showTitle = TRUE
+        )
+    })
+
+    # 3. Gene Track (MANE Select)
+    gene_track <- GeneRegionTrack(txdb_mane,
+        genome = gen, chromosome = chrom, start = start_pos, end = end_pos,
+        name = "MANE Select",
+        transcriptAnnotation = "group",
+        showId = TRUE,
+        geneSymbols = TRUE,
+        just.group = "left",
+        stacking = "full",
+        collapseTranscripts = FALSE,
+        fill = "black", col = "black",
+        fontcolor.group = "black", fontsize.group = 7, fontface.group = 1,
+        background.title = "transparent",
+        background.panel = "transparent",
+        col.frame = "transparent",
+        col.title = "black", fontsize.title = 7, cex.title = 6 / 7, fontface.title = 1,
+        thinBoxFeature = c("UTR", "ncRNA", "utr", "3'UTR", "5'UTR"),
+        col.line = "black",
+        rotation.title = 0
+    )
+
+    # Map Symbols
+    if (length(ranges(gene_track)) > 0) {
+        gids <- gene(gene_track)
+        clean_gids <- gsub("^GeneID:", "", gids)
+        to_map <- unique(clean_gids[!is.na(clean_gids)])
+        if (length(to_map) > 0) {
+            sym_map <- tryCatch(
+                {
+                    suppressMessages(mapIds(org.Hs.eg.db, keys = to_map, column = "SYMBOL", keytype = "ENTREZID", multiVals = "first"))
+                },
+                error = function(e) {
+                    return(NULL)
+                }
+            )
+            if (!is.null(sym_map)) {
+                mapped_syms <- sym_map[clean_gids]
+                mapped_syms[is.na(mapped_syms)] <- clean_gids[is.na(mapped_syms)]
+                ranges(gene_track)$group <- mapped_syms
+                ranges(gene_track)$symbol <- mapped_syms
+            }
+        }
+    }
+
+    # 4. DAS Peaks Track (BED)
+    peaks_gr <- subsetByOverlaps(all_das_peaks_gr, region_gr)
+    das_peaks_track <- NULL
+    if (length(peaks_gr) > 0) {
+        das_peaks_track <- AnnotationTrack(
+            range = peaks_gr, genome = gen, chromosome = chrom,
+            name = "DAS Peaks",
+            shape = "box", fill = "#FF8400", col = "transparent",
+            background.title = "transparent",
+            background.panel = "transparent",
+            col.frame = "transparent",
+            col.title = "black", fontcolor.title = "black", fontsize.title = 7, cex.title = 6 / 7, fontface.title = 1,
+            rotation.title = 0
+        )
+    }
+
+    # Assemble Final List
+    final_list <- c(list(strack), bw_tracks, list(gene_track))
+    if (!is.null(das_peaks_track)) final_list <- c(final_list, list(das_peaks_track))
+
+    # Define Sizes
+    sizes_vec <- c(0.5, rep(1, 8), 0.5, 0.375)
+    if (is.null(das_peaks_track)) sizes_vec <- sizes_vec[-length(sizes_vec)]
+
+    # Save PDF
+    pdf_name <- file.path(output_dir, paste0("DAS_region_", chrom, "_", start_pos, ".pdf"))
+    pdf(pdf_name, width = 3, height = 4)
+    plotTracks(final_list,
+        from = start_pos, to = end_pos, chromosome = chrom,
+        main = plot_title,
+        fontsize = 7,
+        cex.main = 7 / 12,
+        margin = 2,
+        sizes = sizes_vec, title.width = 1.1
+    )
+    dev.off()
+
+    # Save PNG
+    png_name <- file.path(output_dir, paste0("DAS_region_", chrom, "_", start_pos, ".png"))
+    png(png_name, width = 3, height = 4, units = "in", res = 300)
+    plotTracks(final_list,
+        from = start_pos, to = end_pos, chromosome = chrom,
+        main = plot_title,
+        fontsize = 7,
+        cex.main = 7 / 12,
+        margin = 2,
+        sizes = sizes_vec, title.width = 1.1
+    )
+    dev.off()
+
+    # Display in Rmd
+    plotTracks(final_list,
+        from = start_pos, to = end_pos, chromosome = chrom,
+        main = plot_title,
+        fontsize = 7,
+        cex.main = 7 / 12,
+        margin = 2,
+        sizes = sizes_vec, title.width = 1.1
+    )
+}
+```

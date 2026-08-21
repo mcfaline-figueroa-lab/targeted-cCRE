@@ -1,0 +1,1258 @@
+---
+title: "combine_cds_preliminary_plots_prep_cds_for_sliding_window"
+output: html_document
+date: "2025-06-16"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+
+
+```{r}
+library(Biostrings)
+library(DESeq2)
+library(Matrix)
+library(SummarizedExperiment)
+library(dplyr)
+library(ggplot2)
+library(ggrastr)
+library(gridExtra)
+library(htmlwidgets)
+library(monocle3)
+library(plotly)
+library(readr)
+library(stringr)
+library(tidyr)
+```
+
+
+
+
+```{r}
+working_dir <- "./outputs/"
+```
+
+```{r}
+path_for_plots <- "./outputs/plots/"
+```
+
+
+```{r}
+targeted_cCRE_1_cds <- readRDS("./outputs/targeted_cCRE_1_final.RDS")
+targeted_cCRE_2_cds <- readRDS("./outputs/targeted_cCRE_2_final.RDS")
+targeted_cCRE_3_cds <- readRDS("./outputs/targeted_cCRE_3_final.RDS")
+```
+
+```{r}
+# Combine the three CDS objects into one
+CDS_w_HASH_CROP <- combine_cds(
+  list(targeted_cCRE_1_cds, targeted_cCRE_2_cds, targeted_cCRE_3_cds),
+  sample_col_name = "cds_identifier"
+)
+```
+
+```{r}
+coldata_CDS_w_HASH_CROP <- colData(CDS_w_HASH_CROP) %>% as.data.frame()
+
+sgRNA_l <- read.csv("../data/common_references/sgRNA_library_FINAL_w_sgOPTI_CROP_adapters.csv", stringsAsFactors = FALSE)
+
+CROP_samplesheet <- read.table("../data/common_references/final_CROP_samplesheet_unique_numbers.txt",
+  header = FALSE, sep = "\t", stringsAsFactors = FALSE
+)
+colnames(CROP_samplesheet) <- c("sgRNA", "sgRNA.sequence", "axis")
+CROP_samplesheet <- CROP_samplesheet %>% dplyr::select(sgRNA, sgRNA.sequence)
+
+CROP_samplesheet <- CROP_samplesheet %>%
+  mutate(
+    sgRNA_w_NTC = case_when(
+
+
+      grepl("non_targeting_control", sgRNA) ~ "NTC",
+      grepl("AAVS1", sgRNA) ~ "AAVS1.control",
+      grepl("random_targeting_controls", sgRNA) ~ "random.controls",
+
+
+
+      TRUE ~ sgRNA
+    )
+  )
+```
+# Resolve overlapping ATAC peaks for sgRNAs assigned to multiple bins by selecting the largest peak length.
+# Parse the Gene.Symbol column to determine ATAC seq peak coordinates and calculate peak length.
+
+```{r}
+MSH2_CRE_sgRNA_library_parsed <- sgRNA_l %>%
+  mutate(Gene.Symbol_to_parse = Gene.Symbol) %>%
+  separate(Gene.Symbol_to_parse, into = c("chr", "start_end"), sep = ":") %>%
+  separate(start_end, into = c("Gene.Symbol_start", "Gene.Symbol_end"), sep = "-") %>%
+  mutate(
+    Gene.Symbol_start = as.numeric(Gene.Symbol_start),
+    Gene.Symbol_end = as.numeric(Gene.Symbol_end)
+  )
+
+MSH2_CRE_sgRNA_library_parsed <- MSH2_CRE_sgRNA_library_parsed %>%
+  mutate(ATAC_peak_length = Gene.Symbol_end - Gene.Symbol_start)
+```
+
+
+# Collapse by unique sgRNA.sequence and retain the larger of the two ATAC peaks in the Gene.Symbol column.
+# This ensures only the Gene.Symbol with the maximum ATAC_peak_length is assigned to each sgRNA.
+
+```{r}
+# Part 1: Collapse the dataframe by unique sgRNA, selecting for the max peak length
+collapsed_unique_MSH2_CRE_sgRNA_library_sample_sheet <- MSH2_CRE_sgRNA_library_parsed %>%
+  group_by(sgRNA.sequence) %>%
+  summarise(
+    df_name = paste(df_name, collapse = " / "),
+    Gene.Symbol = {
+      if (all(is.na(ATAC_peak_length))) {
+        paste(Gene.Symbol, collapse = " *!! ")
+      } else {
+        tied <- Gene.Symbol[ATAC_peak_length == max(ATAC_peak_length, na.rm = TRUE)]
+        tied <- sort(tied)
+        if (length(tied) > 1) {
+          paste("ATAC_peak_length tie:", paste(tied, collapse = " * "))
+        } else {
+          tied
+        }
+      }
+    },
+    Gene.Symbol_note = {
+      if (all(is.na(ATAC_peak_length))) {
+        "All ATAC_peak_length values are NA"
+      } else {
+        tied <- Gene.Symbol[ATAC_peak_length == max(ATAC_peak_length, na.rm = TRUE)]
+        if (length(tied) > 1) {
+          "Tie in ATAC_peak_length"
+        } else {
+          num_valid_peaks <- sum(!is.na(ATAC_peak_length))
+          if (num_valid_peaks == 1) {
+            "unique ATAC_bin"
+          } else {
+            "sgRNA duplicated_max ATAC_peak_length"
+          }
+        }
+      }
+    },
+    sgRNA.Strand = paste(unique(sgRNA.Strand), collapse = " ** "),
+    X..edits = ifelse(all(is.na(X..edits)), NA, max(X..edits, na.rm = TRUE)),
+    X.silent.edits = paste(unique(X.silent.edits), collapse = " * "),
+    Nucleotide.edits = paste(unique(Nucleotide.edits), collapse = " * "),
+    Amino.acid.edits = paste(unique(Amino.acid.edits), collapse = " * "),
+    Mutation.category = paste(unique(Mutation.category), collapse = " * "),
+    Clinical.significance = paste(unique(Clinical.significance), collapse = " * "),
+    .groups = "drop"
+  )
+
+collapsed_unique_MSH2_CRE_sgRNA_library_sample_sheet <- collapsed_unique_MSH2_CRE_sgRNA_library_sample_sheet %>%
+  mutate(
+    ATAC_bin = Gene.Symbol, # duplicate Gene.Symbol column
+    ATAC_bin = case_when(
+      grepl("hCRISPRi_non-targeting", ATAC_bin) ~ "NTC",
+      grepl("hCRISPRa_non-targeting", ATAC_bin) ~ "NTC",
+      grepl("AAVS1-controls", ATAC_bin) ~ "AAVS1.control",
+      grepl("random_region", ATAC_bin) ~ "random.controls",
+      TRUE ~ ATAC_bin # keep original if no match
+    )
+  )
+```
+
+```{r}
+full_sgRNA_lib_supplement <- MSH2_CRE_sgRNA_library_parsed
+
+full_sgRNA_lib_supplement <- full_sgRNA_lib_supplement %>%
+  dplyr::mutate(library_summary = dplyr::case_when(
+    df_name %in% c(
+      "chr2_crisprpath_3x_enhancers",
+      "0_edits_chr2_crisprpath_3x_enhancers"
+    ) ~ "chr2_crisprpath_3x_enhancers",
+    grepl("DNase_ATAC_matches_within_2Mb_MSH2_no_rescues", df_name) |
+      grepl("DAS_rescued", df_name) ~ "cCREs",
+    grepl("MSH6_exons", df_name) ~ "MSH6_exons",
+    grepl("MSH2_exons", df_name) ~ "MSH2_exons",
+    df_name %in% c(
+      "CRISPRpath_3x_enhancers_negative_controls",
+      "0_edits_CRISPRpath_3x_enhancers_negative_controls"
+    ) ~ "CRISPRpath_3x_enhancers_negative_controls",
+    grepl("AAVS1_negative_control", df_name) ~ df_name,
+    grepl("hCRISPRa_non_targeting_control", df_name) ~ df_name,
+    grepl("hCRISPRi_non_targeting_control", df_name) ~ df_name,
+    grepl("random_targeting_controls", df_name) ~ df_name,
+    TRUE ~ NA_character_
+  ))
+
+library_controls <- full_sgRNA_lib_supplement %>%
+  dplyr::filter(grepl("control", df_name, ignore.case = TRUE))
+
+library_non_controls <- full_sgRNA_lib_supplement %>%
+  dplyr::filter(!grepl("control", df_name, ignore.case = TRUE))
+```
+
+```{r}
+# ---- ISOLATED: sgRNA library distribution bar plots & tables ----
+# All variables are local to this chunk; nothing written to existing objects.
+
+
+# Output directory (relative to this Rmd's location)
+supp_dist_dir <- "./outputs/supp_figs_sgRNA_library_distribution"
+if (!dir.exists(supp_dist_dir)) dir.create(supp_dist_dir, recursive = TRUE)
+
+# Shared theme: all text at 7pt
+dist_theme <- theme_classic(base_size = 7) +
+  theme(
+    axis.text.x  = element_text(size = 7, angle = 45, hjust = 1),
+    axis.text.y  = element_text(size = 7),
+    axis.title   = element_text(size = 7),
+    plot.title   = element_text(size = 7)
+  )
+
+# ── Plot 1: by library_summary ────────────────────────────────────────────────
+lib_summary_counts <- full_sgRNA_lib_supplement %>%
+  dplyr::count(library_summary, name = "n_sgRNAs") %>%
+  dplyr::arrange(dplyr::desc(n_sgRNAs))
+
+p_lib_summary <- ggplot(
+  lib_summary_counts,
+  aes(x = reorder(library_summary, -n_sgRNAs), y = n_sgRNAs)
+) +
+  geom_bar(stat = "identity", fill = "#4d7eb8") +
+  labs(
+    title = "sgRNA Library Distribution by library_summary",
+    x = "library_summary", y = "Number of sgRNAs"
+  ) +
+  dist_theme
+
+ggsave(file.path(supp_dist_dir, "barplot_by_library_summary.pdf"),
+  plot = p_lib_summary, width = 4, height = 3, units = "in"
+)
+
+tbl_lib_summary <- gridExtra::tableGrob(
+  lib_summary_counts,
+  rows = NULL,
+  theme = gridExtra::ttheme_default(base_size = 7)
+)
+pdf(file.path(supp_dist_dir, "table_by_library_summary.pdf"), width = 5, height = 3)
+gridExtra::grid.arrange(tbl_lib_summary)
+dev.off()
+
+# ── Plot 2: by df_name ────────────────────────────────────────────────────────
+df_name_counts <- full_sgRNA_lib_supplement %>%
+  dplyr::count(df_name, name = "n_sgRNAs") %>%
+  dplyr::arrange(dplyr::desc(n_sgRNAs))
+
+p_df_name <- ggplot(
+  df_name_counts,
+  aes(x = reorder(df_name, -n_sgRNAs), y = n_sgRNAs)
+) +
+  geom_bar(stat = "identity", fill = "#4d7eb8") +
+  labs(
+    title = "sgRNA Library Distribution by df_name",
+    x = "df_name", y = "Number of sgRNAs"
+  ) +
+  dist_theme
+
+ggsave(file.path(supp_dist_dir, "barplot_by_df_name.pdf"),
+  plot = p_df_name, width = 7, height = 4, units = "in"
+)
+
+tbl_df_name <- gridExtra::tableGrob(
+  df_name_counts,
+  rows = NULL,
+  theme = gridExtra::ttheme_default(base_size = 7)
+)
+pdf(file.path(supp_dist_dir, "table_by_df_name.pdf"), width = 7, height = 7)
+gridExtra::grid.arrange(tbl_df_name)
+dev.off()
+
+message("Saved sgRNA distribution plots and tables to: ", supp_dist_dir)
+```
+
+# Add genomic coordinate mapping for each sgRNA sequence.
+```{r}
+all_sense_collapsed_unique_MSH2_CRE_sgRNA_library_sample_sheet <- collapsed_unique_MSH2_CRE_sgRNA_library_sample_sheet %>%
+  mutate(
+    sgRNA_all_SENSE = case_when(
+      sgRNA.Strand == "antisense" ~ as.character(reverseComplement(DNAStringSet(sgRNA.sequence))),
+      TRUE ~ sgRNA.sequence
+    )
+  )
+
+all_sense_collapsed_unique_MSH2_CRE_sgRNA_library_sample_sheet <- all_sense_collapsed_unique_MSH2_CRE_sgRNA_library_sample_sheet %>% dplyr::select(
+  sgRNA.sequence,
+  sgRNA_all_SENSE,
+  sgRNA.Strand,
+  everything()
+)
+```
+
+
+# Load the FASTA file containing the 2Mb region surrounding MSH2.
+```{r}
+full_path <- "../data/targeted_cCRE_combine_cds_preliminary_analysis/df_2Mb_surrounding_MSH2.fa"
+
+#  1. Load the entire FASTA file
+msh2_sequences <- readDNAStringSet(full_path)
+
+# 2. Convert all sequences to uppercase (this works on the whole set)
+msh2_sequences <- toupper(msh2_sequences)
+
+msh2_fasta_final <- msh2_sequences[[1]]
+```
+
+# Load the corresponding BED file for the MSH2 region.
+```{r}
+full_path <- "../data/targeted_cCRE_combine_cds_preliminary_analysis/df_2Mb_surrounding_MSH2.bed"
+msh2_bed <- read.table(full_path, header = FALSE, sep = "\t", stringsAsFactors = FALSE)
+colnames(msh2_bed) <- c("chr", "start", "end")
+```
+
+
+# Map the sgRNA sequences to the reference FASTA to determine their exact genomic coordinates.
+
+```{r}
+msh2_fasta_char <- as.character(msh2_fasta_final)
+
+map_sgRNA_to_fasta <- function(sgRNA_seq, fasta_seq) {
+  match_positions <- gregexpr(sgRNA_seq, fasta_seq)[[1]]
+  if (match_positions[1] != -1) {
+    data.frame(
+      start = match_positions,
+      end = match_positions + nchar(sgRNA_seq) - 1
+    )
+  } else {
+
+
+    NULL
+  }
+}
+
+
+# --- Step 1: Find all positions for every sgRNA ---
+sgRNA_positions_list <- lapply(
+  all_sense_collapsed_unique_MSH2_CRE_sgRNA_library_sample_sheet$sgRNA_all_SENSE,
+  map_sgRNA_to_fasta,
+  fasta_seq = msh2_fasta_char
+)
+
+
+# --- Step 2: Combine all matches into a single long data frame ---
+names(sgRNA_positions_list) <- 1:nrow(all_sense_collapsed_unique_MSH2_CRE_sgRNA_library_sample_sheet)
+
+all_matches_df <- bind_rows(sgRNA_positions_list, .id = "original_index")
+
+
+# --- Step 3: Join the matches back to the original sgRNA data ---
+original_df_with_index <- all_sense_collapsed_unique_MSH2_CRE_sgRNA_library_sample_sheet %>%
+  mutate(original_index = as.character(row_number()))
+
+mapped_df <- left_join(original_df_with_index, all_matches_df, by = "original_index") %>%
+  dplyr::select(-original_index) # Clean up the temporary index
+
+
+# --- Step 4: Convert to genomic coordinates ---
+fasta_start_coord <- msh2_bed$start[1]
+final_mapped_guides <- mapped_df %>%
+  mutate(
+    genomic_start = start + fasta_start_coord - 1,
+    genomic_end = end + fasta_start_coord - 1
+  )
+```
+
+```{r}
+guides_with_multiple_matches <- final_mapped_guides %>%
+  add_count(sgRNA.sequence) %>%
+  dplyr::filter(n > 1) %>%
+  arrange(sgRNA.sequence) # Sorting makes it easy to see the groups together
+```
+
+```{r}
+guides_with_atac_coords <- final_mapped_guides %>%
+  extract(
+    col = ATAC_bin,
+    into = c("ATAC_bin_start", "ATAC_bin_end"),
+    regex = "chr2:(\\d+)-(\\d+)",
+    remove = FALSE,
+    convert = TRUE
+  )
+
+print(head(guides_with_atac_coords))
+```
+# Retain sgRNA mappings strictly within their assigned ATAC_bin boundaries (controls mapped to NA are retained).
+```{r}
+guides_with_controls_kept <- guides_with_atac_coords %>%
+  dplyr::filter(
+
+
+    (genomic_start >= ATAC_bin_start & genomic_end <= ATAC_bin_end) |
+
+
+
+      is.na(ATAC_bin_start)
+  )
+
+head(guides_with_controls_kept)
+dim(guides_with_controls_kept)
+
+guide_information_w_ATAC_bins <- guides_with_controls_kept %>% mutate(ATAC_bin_length = ATAC_bin_end - ATAC_bin_start)
+head(guide_information_w_ATAC_bins)
+dim(guide_information_w_ATAC_bins)
+```
+
+# Calculate mean and median lengths of the targeted ATAC_bins.
+```{r}
+mean(guide_information_w_ATAC_bins$ATAC_bin_length, na.rm = TRUE)
+median(guide_information_w_ATAC_bins$ATAC_bin_length, na.rm = TRUE)
+min(guide_information_w_ATAC_bins$ATAC_bin_length, na.rm = TRUE)
+```
+
+
+```{r}
+ggplot(data = guide_information_w_ATAC_bins, aes(x = ATAC_bin_length)) +
+  geom_histogram(binwidth = 5, fill = "coral", color = "black") + # Adjust binwidth as needed
+  labs(
+    title = "Histogram of ATAC Bin Length",
+    x = "ATAC Bin Length",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+
+
+
+# Merge valid guide mappings with the CROP samplesheet metadata.
+
+```{r}
+merged_crop_library_samplesheet <- inner_join(
+  CROP_samplesheet,
+  guide_information_w_ATAC_bins,
+  by = "sgRNA.sequence"
+)
+
+
+full_path <- file.path(working_dir, "merged_crop_library_samplesheet.csv")
+
+write.csv(
+  merged_crop_library_samplesheet,
+  file = full_path,
+  row.names = FALSE
+
+)
+
+
+
+write.csv(
+  merged_crop_library_samplesheet,
+  file = "./outputs/merged_crop_library_samplesheet.csv",
+  row.names = FALSE
+)
+```
+
+# Calculate the total number of unique sgRNAs assigned to each ATAC_bin.
+```{r}
+sgRNAs_per_ATAC_bin <- merged_crop_library_samplesheet %>%
+  group_by(ATAC_bin) %>%
+  summarise(
+    sgRNA_count = n_distinct(sgRNA.sequence),
+    .groups = "drop"
+  ) %>%
+  arrange(ATAC_bin)
+```
+
+# Merge the validated sgRNA library metadata into the primary CDS colData.
+
+```{r}
+joined_df <- inner_join(coldata_CDS_w_HASH_CROP, merged_crop_library_samplesheet, by = "sgRNA")
+new_colData <- as(joined_df, "DataFrame")
+
+rownames(new_colData) <- new_colData$cell_ID.x
+
+colData(CDS_w_HASH_CROP) <- new_colData
+```
+
+estimate_size_factors
+```{r}
+filtered_KRAB_cds <- estimate_size_factors(CDS_w_HASH_CROP)
+```
+
+```{r}
+# isolated chunk: plot_percent_cells_positive — one PDF per gene for Illustrator assembly
+
+pcp_allcells_genes <- c("MSH2", "MSH6", "B2M", "HPRT1", "PGK1")
+pcp_allcells_outdir <- "./outputs/plots/plot_percent_cells_pos_all_cells"
+dir.create(pcp_allcells_outdir, showWarnings = FALSE, recursive = TRUE)
+
+pcp_allcells_shared_theme <- theme(
+  text            = element_text(size = 7),
+  axis.text       = element_text(size = 7),
+  axis.title      = element_text(size = 7),
+  strip.text      = element_text(size = 7),
+  legend.position = "none"
+)
+
+for (gene in pcp_allcells_genes) {
+  cds_sub <- filtered_KRAB_cds[rowData(filtered_KRAB_cds)$gene_short_name == gene, ]
+  p <- plot_percent_cells_positive(cds_sub) +
+    scale_fill_manual(values = "#00CD66") +
+    pcp_allcells_shared_theme
+
+  ggsave(
+    filename = file.path(
+      pcp_allcells_outdir,
+      paste0("all_cells_pcp_", gene, ".pdf")
+    ),
+    plot = p,
+    width = 1,
+    height = 1.4,
+    units = "in",
+    device = cairo_pdf
+  )
+}
+
+rm(pcp_allcells_genes, pcp_allcells_outdir, pcp_allcells_shared_theme, gene, cds_sub, p)
+```
+
+```{r}
+filtered_KRAB_cds_w_bins <- filtered_KRAB_cds
+
+colData(filtered_KRAB_cds_w_bins)$dose <- as.character(colData(filtered_KRAB_cds_w_bins)$dose)
+colData(filtered_KRAB_cds_w_bins)$bin_dose <- paste(colData(filtered_KRAB_cds_w_bins)$ATAC_bin, colData(filtered_KRAB_cds_w_bins)$dose, sep = "_")
+```
+
+# Finalize the CDS objects for downstream cluster execution.
+
+```{r}
+saveRDS(filtered_KRAB_cds_w_bins, "./outputs/targeted_cCRE_combined_cds_all_genes_final.RDS")
+
+# First, subset for your gene of interest as before
+
+msh2_cds <- filtered_KRAB_cds_w_bins[rowData(filtered_KRAB_cds_w_bins)$gene_short_name == "MSH2", ]
+
+saveRDS(msh2_cds, "./outputs/targeted_cCRE_combined_cds_msh2_only_final.RDS")
+```
+
+
+##############################################
+Make UMAPs 
+
+```{r}
+UMAP_output_dir <- "./outputs/plots/UMAPs"
+final_UMAP_plots_dir <- "./outputs/plots/UMAPs/final_main_figure_plots"
+supplemental_UMAP_plots_dir <- "./outputs/plots/UMAPs/final_supplemental_figs"
+dir.create(final_UMAP_plots_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(supplemental_UMAP_plots_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+```{r}
+preprocess_KRAB_cds <- preprocess_cds(filtered_KRAB_cds_w_bins,
+  method = "PCA",
+  num_dim = 15
+)
+plot_pc_variance_explained(preprocess_KRAB_cds)
+
+ggsave(file.path(UMAP_output_dir, "Variance_explained_15_PCs.png"))
+
+# 4. VARIANCE EXPLAINED PLOT FOR SUPPLEMENTAL (Moved from bottom of script)
+p_var <- plot_pc_variance_explained(preprocess_KRAB_cds) +
+  theme(
+    axis.text = element_text(size = 7),
+    axis.title = element_text(size = 7)
+  )
+
+ggsave(file.path(supplemental_UMAP_plots_dir, "Variance_explained_15_PCs.pdf"),
+  plot = p_var,
+  width = 2.5,
+  height = 1.5
+)
+```
+
+
+```{r}
+preprocess_KRAB_cds <- reduce_dimension(preprocess_KRAB_cds,
+  max_components = 2,
+  reduction_method = "UMAP",
+  preprocess_method = "PCA",
+  umap.min_dist = 0.1,
+  umap.n_neighbors = 20,
+  umap.metric = "cosine"
+)
+```
+
+
+
+```{r}
+# 1. CREATE THE BATCH PLOT
+p_batch <- plot_cells(preprocess_KRAB_cds,
+  color_cells_by = "sample",
+  label_cell_groups = FALSE,
+  cell_size = 0.2,
+  alpha = 0.8
+) +
+  facet_wrap(~sample, scales = "fixed", nrow = 1) + # Force one row for a "Figure 1" look
+  theme_void() + # Matches your MSH2 and Dose aesthetics
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 8, face = "bold")
+  ) # Keeps sample names legible
+
+# 2. RASTERIZE THE DOTS (600 DPI is the sweet spot for 6-inch plots)
+p_batch_raster <- rasterise(p_batch, dpi = 600)
+
+# 3. SAVE THE HYBRID PDF
+# We use a height of 2.5 to keep the facets from looking "stretched" vertically
+ggsave(file.path(UMAP_output_dir, "Batch_A172_Facets_6in_raster.pdf"),
+  plot = p_batch_raster,
+  width = 6,
+  height = 2.5
+)
+
+# 4. SAVE A HIGH-RES PNG FOR SLIDES
+ggsave(file.path(UMAP_output_dir, "Batch_A172_Facets_6in_600dpi.png"),
+  plot = p_batch, # No need for rasterise() on a PNG
+  width = 6,
+  height = 2.5,
+  dpi = 600
+)
+```
+
+
+
+```{r}
+plot_cells(preprocess_KRAB_cds, color_cells_by = "log10.umi", label_cell_groups = FALSE, cell_size = 0.5)
+```
+
+
+
+
+
+#plots below are colorblind friendly from Paul Tol vibrant palette https://sronpersonalpages.nl/~pault/
+  
+
+
+
+
+```{r}
+# Convert dose to a factor with the correct numerical order
+colData(preprocess_KRAB_cds)$dose <- factor(colData(preprocess_KRAB_cds)$dose,
+  levels = c("0", "10", "50", "100")
+)
+
+# Define your named color vector - From Paul Tol color blind friendly palette
+dose_colors <- c(
+  "0" = "#0077BB",
+  "10" = "#33BBEE",
+  "50" = "#EE7733",
+  "100" = "#EE3377"
+)
+
+# Create the plot
+p_dose_small <- plot_cells(preprocess_KRAB_cds,
+  color_cells_by = "dose",
+  label_cell_groups = FALSE,
+  cell_size = 0.25
+) +
+  theme_void() +
+  ggtitle("TMZ") +
+  scale_color_manual(values = dose_colors, name = expression(Dose ~ "(" * mu * M * ")")) +
+  theme(
+    legend.position = "right",
+    text = element_text(size = 7),
+    plot.title = element_text(hjust = 0.5, size = 7),
+    legend.title = element_text(size = 7),
+    legend.text = element_text(size = 7),
+    legend.key.width = unit(0.5, "line"),
+    legend.key.height = unit(0.5, "line")
+  ) +
+  guides(color = guide_legend(override.aes = list(size = 2))) # Smaller legend for 2-inch plot
+
+ggsave(file.path(UMAP_output_dir, "Dose_A172_UMAP_small_color3_900dpi.png"),
+  plot = p_dose_small,
+  width = 2.14,
+  height = 1,
+  dpi = 900
+)
+
+# --- 2. rasterized pdf DOSE PLOT  ---
+
+p_dose_small <- plot_cells(preprocess_KRAB_cds,
+  color_cells_by = "dose",
+  label_cell_groups = FALSE,
+  cell_size = 0.25
+) +
+  theme_void() +
+  ggtitle("TMZ") +
+  scale_color_manual(values = dose_colors, name = expression(Dose ~ "(" * mu * M * ")")) +
+  theme(
+    legend.position = "right",
+    text = element_text(size = 7),
+    plot.title = element_text(hjust = 0.5, size = 7),
+    legend.title = element_text(size = 7),
+    legend.text = element_text(size = 7),
+    legend.key.width = unit(0.5, "line"),
+    legend.key.height = unit(0.5, "line")
+  ) +
+  guides(color = guide_legend(override.aes = list(size = 2))) # Smaller legend for 2-inch plot
+
+# 3. THE FIX: Wrap the plot object in rasterise()
+# This forces the points to flatten at 600 DPI
+p_dose_raster_fixed <- rasterise(p_dose_small, dpi = 900)
+
+# 4. Save the rasterized version
+ggsave(file.path(UMAP_output_dir, "Dose_A172_UMAP_small_color3_900dpi_raster_fixed.pdf"),
+  plot = p_dose_raster_fixed,
+  width = 2.14,
+  height = 1
+)
+
+ggsave(file.path(final_UMAP_plots_dir, "width1_1_height1_Dose_A172_UMAP_small_color3_900dpi_raster_fixed.pdf"),
+  plot = p_dose_raster_fixed,
+  width = 1.1,
+  height = 1
+)
+
+ggsave(file.path(final_UMAP_plots_dir, "width1_1_height1_without_legend_Dose_A172_UMAP_small_color3_900dpi_raster_fixed.pdf"),
+  plot = p_dose_raster_fixed + theme(legend.position = "none"),
+  width = 1.1,
+  height = 1
+)
+
+
+# --- 2. PRESENTATION DOSE PLOT (Large PNG) ---
+p_dose_large <- plot_cells(preprocess_KRAB_cds,
+  color_cells_by = "dose",
+  label_cell_groups = FALSE,
+  cell_size = 0.5
+) +
+  theme_void() +
+  ggtitle("TMZ") +
+  scale_color_manual(values = dose_colors) +
+  theme(
+    legend.position = "right",
+    text = element_text(size = 12), # Visible on slides
+    plot.title = element_text(hjust = 0.5, size = 12),
+    legend.key.width = unit(0.8, "line"),
+    legend.key.height = unit(0.8, "line")
+  ) +
+  guides(color = guide_legend(override.aes = list(size = 4)))
+
+ggsave(file.path(UMAP_output_dir, "Dose_A172_Presentation_Large_color3.png"),
+  plot = p_dose_large,
+  width = 6,
+  height = 5,
+  dpi = 600
+)
+```
+
+
+
+
+```{r}
+# 2. Plot with better labels and rasterization
+plot_cells(preprocess_KRAB_cds,
+  color_cells_by = "dose",
+  label_cell_groups = FALSE,
+  cell_size = 0.1,
+  alpha = 0.2, # Lower alpha helps see density better for 800k
+  rasterize = TRUE
+) + # Crucial for 800k cells
+  facet_wrap(~dose, ncol = 2) +
+  theme_classic(base_size = 8) +
+  theme(
+    legend.position = "none",
+    strip.background = element_blank(), # Cleaner facet titles
+    strip.text = element_text(face = "bold")
+  )
+```
+
+
+
+
+
+#PLOT genes of interest
+
+#PLOT MSH2
+```{r}
+plot_cells(cds = preprocess_KRAB_cds, genes = "MSH2", scale_to_range = FALSE, cell_size = .4, label_cell_groups = FALSE) +
+  theme_void() +
+  viridis::scale_color_viridis(option = "magma", name = "log10(norm\n expr + 0.1)")
+```
+
+```{r}
+p_small_manuscript <- plot_cells(cds = preprocess_KRAB_cds, genes = "MSH2", scale_to_range = FALSE, cell_size = 0.25, label_cell_groups = FALSE) +
+  theme_void() +
+  ggtitle("MSH2") +
+  viridis::scale_color_viridis(option = "magma", name = "log10(norm\n expr + 0.1)") +
+  theme(
+    legend.position = "right",
+    text = element_text(size = 7),
+    plot.title = element_text(hjust = 0.5, size = 7),
+    legend.title = element_text(size = 7),
+    legend.text = element_text(size = 7),
+    legend.key.width = unit(0.5, "line"),
+    legend.key.height = unit(0.5, "line"),
+    strip.text = element_blank(),
+    strip.background = element_blank()
+  )
+
+# Export the small high dpi png
+ggsave(file.path(UMAP_output_dir, "MSH2_A172_UMAP_small_900dpi.png"),
+  plot = p_small_manuscript,
+  width = 2.14,
+  height = 1,
+  dpi = 900
+)
+
+# 3. THE FIX: Wrap the plot object in rasterise()
+# This forces the points to flatten at 900 DPI
+p_raster_fixed <- rasterise(p_small_manuscript, dpi = 900)
+
+# 4. Save the rasterized version
+ggsave(file.path(UMAP_output_dir, "MSH2_A172_UMAP_small_900dpi_raster.pdf"),
+  plot = p_raster_fixed,
+  width = 2.14,
+  height = 1
+)
+
+ggsave(file.path(final_UMAP_plots_dir, "width1_1_height1_MSH2_A172_UMAP_small_900dpi_raster.pdf"),
+  plot = p_raster_fixed,
+  width = 1.1,
+  height = 1
+)
+
+ggsave(file.path(final_UMAP_plots_dir, "width1_1_height1_without_legend_MSH2_A172_UMAP_small_900dpi_raster.pdf"),
+  plot = p_raster_fixed + theme(legend.position = "none"),
+  width = 1.1,
+  height = 1
+)
+
+
+# larger .png version
+p_large <- plot_cells(cds = preprocess_KRAB_cds, genes = "MSH2", scale_to_range = FALSE, cell_size = .5, label_cell_groups = FALSE) +
+  theme_void() +
+  viridis::scale_color_viridis(option = "magma", name = "log10(norm\n expr + 0.1)") +
+  theme(
+    legend.position = "right",
+    text = element_text(size = 12),
+    legend.key.width = unit(0.5, "line"),
+    legend.key.height = unit(0.5, "line")
+  )
+
+ggsave(file.path(UMAP_output_dir, "MSH2_A172_Presentation_Large.png"),
+  plot = p_large,
+  width = 6,
+  height = 5,
+  dpi = 600
+)
+```
+
+
+
+#PLOT B2M
+
+```{r}
+plot_cells(cds = preprocess_KRAB_cds, genes = "B2M", scale_to_range = FALSE, cell_size = .4, label_cell_groups = FALSE) +
+  theme_void() +
+  viridis::scale_color_viridis(option = "magma", name = "log10(norm\n expr + 0.1)")
+```
+
+```{r}
+p_small_manuscript <- plot_cells(cds = preprocess_KRAB_cds, genes = "B2M", scale_to_range = FALSE, cell_size = 0.25, label_cell_groups = FALSE) +
+  theme_void() +
+  viridis::scale_color_viridis(option = "magma", name = "log10(norm\n expr + 0.1)") +
+  theme(
+    legend.position = "right",
+    text = element_text(size = 6),
+    legend.key.width = unit(0.5, "line"),
+    legend.key.height = unit(0.5, "line")
+  )
+
+# Export the small high dpi png
+ggsave(file.path(UMAP_output_dir, "B2M_A172_UMAP_small_900dpi.png"),
+  plot = p_small_manuscript,
+  width = 2.14,
+  height = 1,
+  dpi = 900
+)
+
+# 3. THE FIX: Wrap the plot object in rasterise()
+# This forces the points to flatten at 900 DPI
+p_raster_fixed <- rasterise(p_small_manuscript, dpi = 900)
+
+# 4. Save the rasterized version
+ggsave(file.path(UMAP_output_dir, "B2M_A172_UMAP_small_900dpi_raster.pdf"),
+  plot = p_raster_fixed,
+  width = 2.14,
+  height = 1
+)
+
+
+# larger .png version
+p_large <- plot_cells(cds = preprocess_KRAB_cds, genes = "B2M", scale_to_range = FALSE, cell_size = .5, label_cell_groups = FALSE) +
+  theme_void() +
+  viridis::scale_color_viridis(option = "magma", name = "log10(norm\n expr + 0.1)") +
+  theme(
+    legend.position = "right",
+    text = element_text(size = 12),
+    legend.key.width = unit(0.5, "line"),
+    legend.key.height = unit(0.5, "line")
+  )
+
+ggsave(file.path(UMAP_output_dir, "B2M_A172_Presentation_Large.png"),
+  plot = p_large,
+  width = 6,
+  height = 5,
+  dpi = 600
+)
+```
+
+
+#PLOT MSH6
+```{r}
+plot_cells(cds = preprocess_KRAB_cds, genes = "MSH6", scale_to_range = FALSE, cell_size = .4, label_cell_groups = FALSE) +
+  theme_void() +
+  viridis::scale_color_viridis(option = "magma", name = "log10(norm\n expr + 0.1)")
+```
+
+```{r}
+p_small_manuscript <- plot_cells(cds = preprocess_KRAB_cds, genes = "MSH6", scale_to_range = FALSE, cell_size = 0.25, label_cell_groups = FALSE) +
+  theme_void() +
+  ggtitle("MSH6") +
+  viridis::scale_color_viridis(option = "magma", name = "log10(norm\n expr + 0.1)") +
+  theme(
+    legend.position = "right",
+    text = element_text(size = 7),
+    plot.title = element_text(hjust = 0.5, size = 7),
+    legend.title = element_text(size = 7),
+    legend.text = element_text(size = 7),
+    legend.key.width = unit(0.5, "line"),
+    legend.key.height = unit(0.5, "line"),
+    strip.text = element_blank(),
+    strip.background = element_blank()
+  )
+
+# Export the small high dpi png
+ggsave(file.path(UMAP_output_dir, "MSH6_A172_UMAP_small_900dpi.png"),
+  plot = p_small_manuscript,
+  width = 2.14,
+  height = 1,
+  dpi = 900
+)
+
+# 3. THE FIX: Wrap the plot object in rasterise()
+# This forces the points to flatten at 900 DPI
+p_raster_fixed <- rasterise(p_small_manuscript, dpi = 900)
+
+# 4. Save the rasterized version
+ggsave(file.path(UMAP_output_dir, "MSH6_A172_UMAP_small_900dpi_raster.pdf"),
+  plot = p_raster_fixed,
+  width = 2.14,
+  height = 1
+)
+
+ggsave(file.path(final_UMAP_plots_dir, "width1_1_height1_MSH6_A172_UMAP_small_900dpi_raster.pdf"),
+  plot = p_raster_fixed,
+  width = 1.1,
+  height = 1
+)
+
+ggsave(file.path(final_UMAP_plots_dir, "width1_1_height1_without_legend_MSH6_A172_UMAP_small_900dpi_raster.pdf"),
+  plot = p_raster_fixed + theme(legend.position = "none"),
+  width = 1.1,
+  height = 1
+)
+
+
+# larger .png version
+p_large <- plot_cells(cds = preprocess_KRAB_cds, genes = "MSH6", scale_to_range = FALSE, cell_size = .5, label_cell_groups = FALSE) +
+  theme_void() +
+  viridis::scale_color_viridis(option = "magma", name = "log10(norm\n expr + 0.1)") +
+  theme(
+    legend.position = "right",
+    text = element_text(size = 12),
+    legend.key.width = unit(0.5, "line"),
+    legend.key.height = unit(0.5, "line")
+  )
+
+ggsave(file.path(UMAP_output_dir, "MSH6_A172_Presentation_Large.png"),
+  plot = p_large,
+  width = 6,
+  height = 5,
+  dpi = 600
+)
+```
+
+
+
+# Plot PGK1
+
+```{r}
+plot_cells(cds = preprocess_KRAB_cds, genes = "PGK1", scale_to_range = FALSE, cell_size = .4, label_cell_groups = FALSE) +
+  theme_void() +
+  viridis::scale_color_viridis(option = "magma", name = "log10(norm\n expr + 0.1)")
+```
+
+```{r}
+p_small_manuscript <- plot_cells(cds = preprocess_KRAB_cds, genes = "PGK1", scale_to_range = FALSE, cell_size = 0.25, label_cell_groups = FALSE) +
+  theme_void() +
+  viridis::scale_color_viridis(option = "magma", name = "log10(norm\n expr + 0.1)") +
+  theme(
+    legend.position = "right",
+    text = element_text(size = 6),
+    legend.key.width = unit(0.5, "line"),
+    legend.key.height = unit(0.5, "line")
+  )
+
+# Export the small high dpi png
+ggsave(file.path(UMAP_output_dir, "PGK1_A172_UMAP_small_900dpi.png"),
+  plot = p_small_manuscript,
+  width = 2.14,
+  height = 1,
+  dpi = 900
+)
+
+# 3. THE FIX: Wrap the plot object in rasterise()
+# This forces the points to flatten at 900 DPI
+p_raster_fixed <- rasterise(p_small_manuscript, dpi = 900)
+
+# 4. Save the rasterized version
+ggsave(file.path(UMAP_output_dir, "PGK1_A172_UMAP_small_900dpi_raster.pdf"),
+  plot = p_raster_fixed,
+  width = 2.14,
+  height = 1
+)
+
+
+# larger .png version
+p_large <- plot_cells(cds = preprocess_KRAB_cds, genes = "PGK1", scale_to_range = FALSE, cell_size = .5, label_cell_groups = FALSE) +
+  theme_void() +
+  viridis::scale_color_viridis(option = "magma", name = "log10(norm\n expr + 0.1)") +
+  theme(
+    legend.position = "right",
+    text = element_text(size = 12),
+    legend.key.width = unit(0.5, "line"),
+    legend.key.height = unit(0.5, "line")
+  )
+
+ggsave(file.path(UMAP_output_dir, "PGK1_A172_Presentation_Large.png"),
+  plot = p_large,
+  width = 6,
+  height = 5,
+  dpi = 600
+)
+```
+
+
+
+# PLOT HPRT1
+```{r}
+plot_cells(cds = preprocess_KRAB_cds, genes = "HPRT1", scale_to_range = FALSE, cell_size = .4, label_cell_groups = FALSE) +
+  theme_void() +
+  viridis::scale_color_viridis(option = "magma", name = "log10(norm\n expr + 0.1)")
+```
+
+```{r}
+p_small_manuscript <- plot_cells(cds = preprocess_KRAB_cds, genes = "HPRT1", scale_to_range = FALSE, cell_size = 0.25, label_cell_groups = FALSE) +
+  theme_void() +
+  viridis::scale_color_viridis(option = "magma", name = "log10(norm\n expr + 0.1)") +
+  theme(
+    legend.position = "right",
+    text = element_text(size = 6),
+    legend.key.width = unit(0.5, "line"),
+    legend.key.height = unit(0.5, "line")
+  )
+
+# Export the small high dpi png
+ggsave(file.path(UMAP_output_dir, "HPRT1_A172_UMAP_small_900dpi.png"),
+  plot = p_small_manuscript,
+  width = 2.14,
+  height = 1,
+  dpi = 900
+)
+
+# 3. THE FIX: Wrap the plot object in rasterise()
+# This forces the points to flatten at 900 DPI
+p_raster_fixed <- rasterise(p_small_manuscript, dpi = 900)
+
+# 4. Save the rasterized version
+ggsave(file.path(UMAP_output_dir, "HPRT1_A172_UMAP_small_900dpi_raster.pdf"),
+  plot = p_raster_fixed,
+  width = 2.14,
+  height = 1
+)
+
+
+# larger .png version
+p_large <- plot_cells(cds = preprocess_KRAB_cds, genes = "HPRT1", scale_to_range = FALSE, cell_size = .5, label_cell_groups = FALSE) +
+  theme_void() +
+  viridis::scale_color_viridis(option = "magma", name = "log10(norm\n expr + 0.1)") +
+  theme(
+    legend.position = "right",
+    text = element_text(size = 12),
+    legend.key.width = unit(0.5, "line"),
+    legend.key.height = unit(0.5, "line")
+  )
+
+ggsave(file.path(UMAP_output_dir, "HPRT1_A172_Presentation_Large.png"),
+  plot = p_large,
+  width = 6,
+  height = 5,
+  dpi = 600
+)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+# Define supplemental output directory
+
+
+# 1. NEW BATCH PLOTS FOR SUPPLEMENTAL
+# Reorder the sample factor as requested
+colData(preprocess_KRAB_cds)$sample <- factor(colData(preprocess_KRAB_cds)$sample,
+  levels = c(
+    "KRAB_new_DEPC_premade_probes",
+    "targeted_sci_KRAB_5_28_25",
+    "KRAB_7_16_25_P7cols_2_7_8_11_12"
+  )
+)
+
+# --- Faceted version ---
+p_batch_supp <- plot_cells(preprocess_KRAB_cds,
+  color_cells_by = "sample",
+  label_cell_groups = FALSE,
+  cell_size = 0.03
+) +
+  facet_wrap(~sample, scales = "fixed", nrow = 1) +
+  theme_void() +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 7, face = "plain")
+  ) # Size 7, not bold
+
+p_batch_supp_raster <- rasterise(p_batch_supp, dpi = 900)
+
+ggsave(file.path(supplemental_UMAP_plots_dir, "width3_09_height0_97_Batch_A172_Facets_900dpi_raster.pdf"),
+  plot = p_batch_supp_raster,
+  width = 3.09,
+  height = 0.97
+)
+
+# --- Overlapping version (No Facets) ---
+p_batch_overlap <- plot_cells(preprocess_KRAB_cds,
+  color_cells_by = "sample",
+  label_cell_groups = FALSE,
+  cell_size = 0.025,
+  alpha = 0.6
+) +
+  ggtitle("sci reps") + # Updated title
+  theme_void() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 7), # Size 7, not bold
+    legend.position = "none"
+  )
+
+p_batch_overlap_raster <- rasterise(p_batch_overlap, dpi = 900)
+
+ggsave(file.path(supplemental_UMAP_plots_dir, "width1_height1_sci_reps_A172_Overlapping_900dpi_raster.pdf"),
+  plot = p_batch_overlap_raster,
+  width = 1,
+  height = 1
+)
+
+
+# 2. DOSE PLOT FOR SUPPLEMENTAL
+# Create a formatted dose factor with plotmath expression for 'µM' safely, robust to re-running the chunk
+colData(preprocess_KRAB_cds)$dose_formatted <- factor(
+  gsub(" ~ mu \\* M", "", gsub(" \u03BCM", "", gsub(" \u00B5M", "", as.character(colData(preprocess_KRAB_cds)$dose)))),
+  levels = c("0", "10", "50", "100")
+)
+levels(colData(preprocess_KRAB_cds)$dose_formatted) <- paste0(
+  levels(colData(preprocess_KRAB_cds)$dose_formatted), " ~ mu * M"
+)
+
+dose_colors <- c(
+  "0 ~ mu * M" = "#0077BB",
+  "10 ~ mu * M" = "#33BBEE",
+  "50 ~ mu * M" = "#EE7733",
+  "100 ~ mu * M" = "#EE3377"
+)
+
+p_dose_supp <- plot_cells(preprocess_KRAB_cds,
+  color_cells_by = "dose_formatted",
+  label_cell_groups = FALSE,
+  cell_size = 0.03,
+  alpha = 0.3
+) +
+  facet_wrap(~dose_formatted, nrow = 1, labeller = label_parsed) +
+  theme_void() +
+  scale_color_manual(values = dose_colors) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 7, face = "plain")
+  )
+
+p_dose_supp_raster <- rasterise(p_dose_supp, dpi = 900)
+
+ggsave(file.path(supplemental_UMAP_plots_dir, "width4_12_height1_Dose_A172_Facets_900dpi_raster.pdf"),
+  plot = p_dose_supp_raster,
+  width = 4.12,
+  height = 1
+)
+
+
+# 3. GENE PLOTS FOR SUPPLEMENTAL
+# List of genes to plot
+genes_to_plot <- c("MSH6", "B2M", "PGK1", "HPRT1")
+
+for (gene_name in genes_to_plot) {
+  # Create the plot
+  p_gene <- plot_cells(
+    cds = preprocess_KRAB_cds,
+    genes = gene_name,
+    scale_to_range = FALSE,
+    cell_size = 0.25,
+    label_cell_groups = FALSE
+  ) +
+    theme_void() +
+    ggtitle(gene_name) +
+    viridis::scale_color_viridis(option = "magma", name = "log10(norm\n expr + 0.1)") +
+    theme(
+      legend.position = "right",
+      text = element_text(size = 7),
+      plot.title = element_text(hjust = 0.5, size = 7),
+      legend.title = element_text(size = 7),
+      legend.text = element_text(size = 7),
+      legend.key.width = unit(0.5, "line"),
+      legend.key.height = unit(0.5, "line"),
+      strip.text = element_blank(),
+      strip.background = element_blank()
+    )
+
+  # Rasterize the plot at 900 DPI
+  p_gene_raster <- rasterise(p_gene, dpi = 900)
+
+  # Save the plot with 1.55 inch width and 1.05 inch height
+  file_name <- paste0("width1_55_height1_05_", gene_name, "_A172_UMAP_small_900dpi_raster.pdf")
+  ggsave(file.path(supplemental_UMAP_plots_dir, file_name),
+    plot = p_gene_raster,
+    width = 1.55,
+    height = 1.05
+  )
+}
+
+```

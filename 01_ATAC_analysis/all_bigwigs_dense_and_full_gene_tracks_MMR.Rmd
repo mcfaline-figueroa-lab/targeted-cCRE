@@ -1,0 +1,440 @@
+---
+title: "dense gene tracks MMR highlighted with full gene track ref"
+output: html_document
+date: "2026-02-11"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+MANE Transcript was used for plotting
+
+MANE Transcript Annotation Data
+Version: 1.5 (Released/Updated: August 2025)
+Assembly: GRCh38 / hg38
+Source: ftp://ftp.ncbi.nlm.nih.gov/refseq/MANE/release_1.5/
+Retrieved: 2026-02-10
+Note: Verified against UCSC Genome Browser MANE Select track (Release GCF_000001405.40-RS_2025_08)
+
+```{r}
+# ==============================================================================
+# ATAC-seq Plotting: Layered Drawing + Full Gene Track Reference
+# ==============================================================================
+
+# 1. Load Libraries
+suppressPackageStartupMessages({
+    library(Gviz)
+    library(rtracklayer)
+    library(GenomicFeatures)
+    library(org.Hs.eg.db)
+    library(grid)
+})
+
+# ------------------------------------------------------------------------------
+# CONFIGURATION
+# ------------------------------------------------------------------------------
+mane_gff_path <- "../data/MANE/MANE.GRCh38.v1.5.refseq_genomic.gff.gz"
+bw_dir <- "../data/A172_GBM_ATAC_seq/"
+bw_files <- c(
+    "48hr_0.mRp.clN.bigWig", "48hr_10.mRp.clN.bigWig", "48hr_50.mRp.clN.bigWig", "48hr_100.mRp.clN.bigWig",
+    "96hr_0.mRp.clN.bigWig", "96hr_10.mRp.clN.bigWig", "96hr_50.mRp.clN.bigWig", "96hr_100.mRp.clN.bigWig"
+)
+track_color <- "#8C8C8C" # Grey (use "#8C8C8C" for grey, or "#377eb8" for blue)
+output_dir <- "./outputs/all_bigwigs_dense_and_full_gene_tracks_MMR/"
+
+# Ensure output directory exists
+if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+}
+
+# Genes to Highlight (Red)
+HIGHLIGHT_GENES <- c("MSH2", "MSH6", "MLH1", "PMS2")
+
+# Load TxDb
+if (!file.exists(mane_gff_path)) stop("MANE GFF file not found!")
+message("Loading TxDb...")
+txdb_mane <- makeTxDbFromGFF(mane_gff_path, format = "gff")
+seqlevelsStyle(txdb_mane) <- "UCSC"
+gen <- "hg38"
+
+# ------------------------------------------------------------------------------
+# HELPER 1: Robust Gene Key Lookup
+# ------------------------------------------------------------------------------
+get_real_db_key <- function(symbol, txdb) {
+    all_keys <- keys(txdb, keytype = "GENEID")
+    if (symbol %in% all_keys) {
+        return(symbol)
+    }
+
+    entrez_id <- suppressMessages(mapIds(org.Hs.eg.db,
+        keys = symbol, column = "ENTREZID",
+        keytype = "SYMBOL", multiVals = "first"
+    ))
+    if (!is.na(entrez_id)) {
+        if (entrez_id %in% all_keys) {
+            return(entrez_id)
+        }
+        if (paste0("GeneID:", entrez_id) %in% all_keys) {
+            return(paste0("GeneID:", entrez_id))
+        }
+    }
+    return(NULL)
+}
+
+# ------------------------------------------------------------------------------
+# HELPER 2: Pure Math Gene Model (Splits CDS and UTR)
+# ------------------------------------------------------------------------------
+get_window_gene_model <- function(region_gr, txdb) {
+    # 1. Find transcripts
+    txs_in_window <- subsetByOverlaps(transcripts(txdb), region_gr)
+    if (length(txs_in_window) == 0) {
+        return(NULL)
+    }
+
+    tx_ids <- txs_in_window$tx_id
+    tx_names <- txs_in_window$tx_name
+
+    gene_ids <- tryCatch(
+        {
+            unlist(mapIds(txdb, keys = as.character(tx_ids), column = "GENEID", keytype = "TXID", multiVals = "first"))
+        },
+        error = function(e) {
+            return(rep(NA, length(tx_ids)))
+        }
+    )
+
+    # 2. Extract Components (Calculated)
+    cds_list <- cdsBy(txdb, by = "tx")
+    ex_list <- exonsBy(txdb, by = "tx")
+
+    final_gr <- GRanges()
+
+    # 3. Build Model Loop
+    for (i in seq_along(tx_ids)) {
+        tid_str <- as.character(tx_ids[i])
+        gid <- if (is.na(gene_ids[i])) "Unknown" else gene_ids[i]
+        parts <- GRanges()
+
+        if (tid_str %in% names(ex_list)) {
+            exs <- ex_list[[tid_str]]
+
+            if (tid_str %in% names(cds_list)) {
+                cds <- cds_list[[tid_str]]
+                cds$feature <- "CDS"
+
+                # Math: UTR = Exon - CDS
+                utrs <- GenomicRanges::setdiff(exs, cds)
+                if (length(utrs) > 0) utrs$feature <- "UTR"
+
+                parts <- c(cds, utrs)
+            } else {
+                exs$feature <- "UTR"
+                parts <- exs
+            }
+        }
+
+        if (length(parts) > 0) {
+            parts$transcript <- tx_names[i]
+            parts$gene <- gid
+            parts$exon <- paste0("exon_", seq_along(parts))
+            final_gr <- c(final_gr, parts)
+        }
+    }
+
+    # 4. Symbol Mapping
+    unique_gids <- unique(final_gr$gene)
+    unique_gids <- unique_gids[!is.na(unique_gids) & unique_gids != "Unknown"]
+
+    if (length(unique_gids) > 0) {
+        clean_gids <- gsub("^GeneID:", "", unique_gids)
+        sym_map <- tryCatch(
+            {
+                mapIds(org.Hs.eg.db,
+                    keys = clean_gids, column = "SYMBOL",
+                    keytype = "ENTREZID", multiVals = "first"
+                )
+            },
+            error = function(e) {
+                return(NULL)
+            }
+        )
+
+        final_syms <- if (is.null(sym_map)) clean_gids else sym_map
+        names(final_syms) <- unique_gids
+        if (!is.null(sym_map)) {
+            names(sym_map) <- unique_gids
+            safe_syms <- sym_map
+        } else {
+            safe_syms <- final_syms
+        }
+        safe_syms[is.na(safe_syms)] <- clean_gids[is.na(safe_syms)]
+        final_gr$symbol <- safe_syms[final_gr$gene]
+    } else {
+        final_gr$symbol <- final_gr$gene
+    }
+
+    final_gr$feature <- ifelse(final_gr$feature == "CDS", "CDS", "UTR")
+    return(final_gr)
+}
+
+# ------------------------------------------------------------------------------
+# PLOTTING FUNCTION
+# ------------------------------------------------------------------------------
+generate_plot <- function(target_gene) {
+    message(paste("Generating plot for:", target_gene))
+
+    loc <- get_gene_center(target_gene, txdb_mane)
+    if (is.null(loc)) {
+        warning(paste("Skipping", target_gene, "- not found"))
+        return()
+    }
+
+    start_pos <- floor(loc$midpoint - 250000)
+    end_pos <- floor(loc$midpoint + 249999)
+    chrom <- loc$chrom
+    region_gr <- GRanges(chrom, IRanges(start_pos, end_pos))
+
+    message(paste("  Region:", chrom, start_pos, "-", end_pos))
+
+    # 1. Build Full Model
+    full_model <- get_window_gene_model(region_gr, txdb_mane)
+    if (is.null(full_model)) {
+        warning("No gene model found.")
+        return()
+    }
+
+    # 2. SEPARATE INTO 3 GROUPS
+    is_target <- full_model$symbol %in% HIGHLIGHT_GENES
+    is_target[is.na(is_target)] <- FALSE
+
+    # Group A: Grey Neighbors (Everything not in highlight list)
+    gr_grey <- full_model[!is_target]
+
+    # Group B: Target UTRs Only
+    gr_red_utr <- full_model[is_target & full_model$feature == "UTR"]
+
+    # Group C: Target CDS Only
+    gr_red_cds <- full_model[is_target & full_model$feature == "CDS"]
+
+    # 3. Create Tracks
+    common_args <- list(
+        genome = gen, chromosome = chrom, start = start_pos, end = end_pos,
+        name = "Genes", stacking = "dense", collapseTranscripts = FALSE,
+        transcriptAnnotation = "symbol",
+        fontcolor.group = "black", fontsize.group = 7, fontface.group = 2,
+        just.group = "below", background.title = "transparent",
+        col.title = "black", margin = 0, innerMargin = 0,
+        col = "transparent"
+    )
+
+    track_list <- list()
+
+    # Track 1: Grey Neighbors
+    if (length(gr_grey) > 0) {
+        # Treat everything as "UTR" logic (thin/thick handled automatically by Gviz defaults)
+        # OR force everything grey
+        track_list[[1]] <- do.call(GeneRegionTrack, c(list(range = gr_grey, fill = "grey80", thinBoxFill = "grey80", thinBoxFeature = "UTR"), common_args))
+    }
+
+    # Track 2: Red UTRs (FORCE THIN)
+    if (length(gr_red_utr) > 0) {
+        # We pass only UTRs and tell Gviz "Everything here is a UTR"
+        # This guarantees they are drawn as thin lines
+        track_list[[length(track_list) + 1]] <- do.call(GeneRegionTrack, c(list(range = gr_red_utr, fill = "red", thinBoxFill = "red", thinBoxFeature = "UTR"), common_args))
+    }
+
+    # Track 3: Red CDS (FORCE THICK)
+    if (length(gr_red_cds) > 0) {
+        # We pass only CDS and tell Gviz "Nothing here is a UTR" (thinBoxFeature="NONE")
+        # This guarantees they are drawn as thick boxes
+        track_list[[length(track_list) + 1]] <- do.call(GeneRegionTrack, c(list(range = gr_red_cds, fill = "red", thinBoxFill = "red", thinBoxFeature = "NONE"), common_args))
+    }
+
+    # 4. Overlay Tracks (Dense Gene Track)
+    combined_genes <- OverlayTrack(trackList = track_list, showTitle = FALSE, background.title = "transparent")
+
+    # 5. NEW: Full Gene Track Reference (For Illustrator)
+    ref_track <- GeneRegionTrack(txdb_mane,
+        genome = gen, chromosome = chrom, start = start_pos, end = end_pos,
+        name = "Ref", transcriptAnnotation = "symbol",
+        just.group = "below", stacking = "squish",
+        collapseTranscripts = FALSE,
+        showTitle = FALSE, background.title = "transparent",
+        fontsize.group = 7, fontcolor.group = "black",
+        col.line = "black", fill = "grey90", col = "transparent"
+    )
+
+    # FIX: Map symbols for Ref track manually
+    # Gviz TxDb tracks use Entrez IDs/Gene IDs by default. We need to map them to Symbols.
+    if (length(ranges(ref_track)) > 0) {
+        # 1. Get Transcript Names (e.g. NM_000179.3)
+        tx_names <- transcript(ref_track)
+
+        # 2. Map Transcript -> Entrez Gene ID using the TxDb itself
+        # This is robust because it uses the internal linkage of the TxDb object
+        gids <- tryCatch(
+            {
+                suppressMessages(mapIds(txdb_mane, keys = tx_names, column = "GENEID", keytype = "TXNAME", multiVals = "first"))
+            },
+            error = function(e) {
+                # Fallback if TXNAME keytype fails (unlikely for TxDb)
+                return(rep(NA, length(tx_names)))
+            }
+        )
+
+        # 3. Map Entrez Gene ID -> Symbol using OrgDb
+        clean_gids <- gsub("^GeneID:", "", gids)
+
+        # Only map valid, non-NA, non-Unknown IDs
+        to_map <- unique(clean_gids[!is.na(clean_gids) & clean_gids != "Unknown" & clean_gids != ""])
+
+        valid_syms <- character(0)
+        if (length(to_map) > 0) {
+            valid_syms <- tryCatch(
+                {
+                    suppressMessages(mapIds(org.Hs.eg.db, keys = to_map, column = "SYMBOL", keytype = "ENTREZID", multiVals = "first"))
+                },
+                error = function(e) {
+                    return(NULL)
+                }
+            )
+        }
+
+        # 4. Construct final Symbol vector
+        # Start with original Transcript Name or Gene ID as fallback
+        syms <- tx_names
+
+        # Use Gene ID if available (better than TxName if symbol fails)
+        has_gid <- !is.na(clean_gids) & clean_gids != "Unknown"
+        syms[has_gid] <- clean_gids[has_gid]
+
+        # Overwrite with Symbol if successfully mapped
+        if (!is.null(valid_syms)) {
+            # valid_syms names correspond to to_map (Gene IDs)
+            # Find indices in clean_gids that match to_map
+            matches <- match(clean_gids, names(valid_syms))
+
+            # Identify which clean_gids have a valid match
+            has_match <- !is.na(matches)
+
+            # Apply map
+            syms[has_match] <- valid_syms[matches[has_match]]
+        }
+
+        # Use "Unknown" for any remaining NAs
+        syms[is.na(syms)] <- "Unknown"
+
+        # 4. Fallback: if symbol is NA, keep gene ID or transcript ID
+        syms[is.na(syms)] <- clean_gids[is.na(syms)]
+        syms[is.na(syms) | syms == "Unknown"] <- tx_names[is.na(syms) | syms == "Unknown"]
+
+        # Assign back to "symbol" for transcriptAnnotation="symbol" to work
+        ranges(ref_track)$symbol <- syms
+    }
+
+    # 6. BigWig Data Tracks
+    max_scores <- sapply(bw_files, function(f) {
+        f_path <- file.path(bw_dir, paste0("GSM9825200_", f))
+        if (file.exists(f_path)) {
+            imported_bw <- import.bw(f_path, selection = region_gr)
+            if (length(imported_bw) > 0) {
+                return(max(score(imported_bw)))
+            }
+        }
+        return(0)
+    })
+    global_ymax <- max(max_scores) * 1.05
+    tick_interval <- if (global_ymax <= 3) 1 else 2
+
+    bw_tracks <- lapply(bw_files, function(f) {
+        f_path <- file.path(bw_dir, paste0("GSM9825200_", f))
+        track_name <- gsub(".mRp.clN.bigWig", "", f)
+        track_name <- gsub("_", " ", track_name)
+
+        DataTrack(
+            range = f_path, genome = gen, type = "histogram",
+            chromosome = chrom, name = track_name, ylim = c(0, global_ymax),
+            yTicksAt = seq(0, floor(global_ymax), by = tick_interval),
+            col.histogram = track_color, fill.histogram = track_color,
+            # Remove Blue Block but Keep Axis
+            background.title = "transparent",
+            col.title = "black", fontcolor.title = "black", fontsize.title = 6, cex.title = 1.0, fontface.title = 1,
+            col.axis = "black", fontcolor.axis = "black", fontsize.axis = 6, cex.axis = 1.0, fontface.axis = 1,
+            margin = 2, innerMargin = 2, # Small margin to prevent clipping
+            showTitle = TRUE
+        )
+    })
+
+    # Scale Bar (Thinner line, smaller font)
+    # Using labelPos="above" as requested by user
+    strack <- GenomeAxisTrack(scale = 0.2, labelPos = "above", showTitle = FALSE, col = "#666666", fontcolor = "#666666", fontsize = 6, lwd = 1)
+
+    # Spacer Track to create vertical gap between bigwig tracks
+    spacer_track <- AnnotationTrack(
+        range = GenomicRanges::GRanges(), genome = gen, chromosome = chrom,
+        name = "", background.title = "transparent", col.title = "transparent",
+        background.panel = "transparent", col.frame = "transparent"
+    )
+
+    # Interleave bigwig tracks with spacer tracks
+    bw_tracks_with_spacers <- list()
+    h_data_with_spacers <- numeric()
+    for (i in seq_along(bw_tracks)) {
+        bw_tracks_with_spacers <- c(bw_tracks_with_spacers, list(bw_tracks[[i]]))
+        h_data_with_spacers <- c(h_data_with_spacers, 0.5)
+        if (i < length(bw_tracks)) {
+            bw_tracks_with_spacers <- c(bw_tracks_with_spacers, list(spacer_track))
+            h_data_with_spacers <- c(h_data_with_spacers, 0.05) # Spacer height
+        }
+    }
+
+    # Layout (Fixed)
+    h_gene <- 0.3
+    h_ref <- 1.1
+    h_scale <- 0.4 # More vertical space for label
+
+    track_list <- c(list(strack), bw_tracks_with_spacers, list(combined_genes, ref_track))
+    track_sizes <- c(h_scale, h_data_with_spacers, h_gene, h_ref)
+
+    # 1. Save PDF
+    fname_pdf <- paste0(output_dir, "Plot_", target_gene, ".pdf")
+    pdf(fname_pdf, width = 4, height = sum(track_sizes))
+
+    plotTracks(track_list,
+        from = start_pos, to = end_pos, chromosome = chrom,
+        # Add gene title (ensure it is black and visible)
+        main = target_gene, cex.main = 0.5, margin = 40, col.main = "black", col.title = "black",
+        sizes = track_sizes, title.width = 0.6
+    )
+    dev.off()
+    message(paste("Saved PDF:", fname_pdf))
+
+    # 2. Save PNG
+    fname_png <- paste0(output_dir, "Plot_", target_gene, ".png")
+    png(fname_png, width = 4, height = sum(track_sizes), units = "in", res = 300)
+
+    plotTracks(track_list,
+        from = start_pos, to = end_pos, chromosome = chrom,
+        # Add gene title (ensure it is black and visible)
+        main = target_gene, cex.main = 0.5, margin = 40, col.main = "black", col.title = "black",
+        sizes = track_sizes, title.width = 0.6
+    )
+    dev.off()
+    message(paste("Saved PNG:", fname_png))
+}
+
+# Helper for Center
+get_gene_center <- function(symbol, txdb) {
+    db_key <- get_real_db_key(symbol, txdb)
+    if (is.null(db_key)) {
+        return(NULL)
+    }
+    g_range <- genes(txdb)[db_key]
+    list(chrom = as.character(seqnames(g_range))[1], midpoint = (start(g_range) + end(g_range)) / 2)
+}
+
+# Run
+genes_to_plot <- c("MSH2", "MSH6", "MLH1", "PMS2")
+for (g in genes_to_plot) generate_plot(g)
+```

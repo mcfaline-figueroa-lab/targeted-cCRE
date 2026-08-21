@@ -1,0 +1,11 @@
+Sequence,Amino_Acid_Edits,Corrected_Clinical_Significance,Corrected_Mutation_Category
+AATGCTAGTTGCTTGTTTGG,Ser328Asn,Uncertain significance,Missense
+GAATCCCAAGCCCACGTTAG,Ser348Phe;Gln349Ter,Conflicting classifications of pathogenicity;Pathogenic/Likely pathogenic,Missense;Nonsense
+TTTCATGATACCAAACAGTA,Glu368Lys,Uncertain significance,Missense
+GGTATCATGAAACTTTAGAA,His367Tyr,None,Missense
+GTACTCCTGGGATGAGGAAG,Thr407Ile;Pro408Phe,Uncertain significance;None,Missense;Missense
+CTCCTGGGATGAGGAAGTGG,Pro408Leu,None,Missense
+TGCCACCACTTCCTCATCCC,Trp414Ter;Trp413Ter,Pathogenic;Pathogenic,Nonsense;Nonsense
+ACACACCATATGCACGAGTA,Val558Met;Gly557Asn,Uncertain significance;None,Missense;Missense
+GTATCGTTTACAGCCCTTCT,Arg1005Gln,Conflicting classifications of pathogenicity,Missense
+AAGTCTTCGTAATGCAAGGA,Lys1101Lys;Thr1100Thr,Likely benign;Benign/Likely benign,Silent;Silent

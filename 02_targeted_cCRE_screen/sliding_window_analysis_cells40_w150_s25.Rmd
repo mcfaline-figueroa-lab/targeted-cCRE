@@ -1,0 +1,1069 @@
+---
+title: "boostrapped_lollipop_plots"
+output: html_document
+date: "2025-06-16"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+
+
+```{r}
+library(Biostrings)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(readr)
+library(ggplot2)
+library(htmlwidgets)
+library(plotly)
+library(SummarizedExperiment)
+library(Matrix)
+library(DESeq2)
+library(monocle3)
+```
+
+
+```{r}
+output_dir <- "./outputs/sliding_window_40cells"
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+```
+
+# 1. Load Data
+```{r}
+# loading results from cluster back in here - Define the file path
+file_path <- "../data/HPC_outputs/40cells_msh2_sliding_window_GLM_1000bootstrap_results.csv"
+
+# Read the CSV into a data frame
+modeling_results <- read.csv(file_path)
+
+# Calculate Benjamini-Hochberg Adjusted P-value on raw, full data (only for successful models)
+modeling_results <- modeling_results %>%
+  mutate(
+    adjusted_p_value = if_else(
+      status == "OK" & !is.na(median_p_value),
+      p.adjust(median_p_value, method = "BH"),
+      as.numeric(NA)
+    )
+  )
+
+# Now, add the 'window' column to your dataframe
+modeling_results <- modeling_results %>%
+  mutate(
+    window = if_else(
+      # This is the condition to check
+      window_scheme == "NA_control_window",
+
+      # Value if the condition is TRUE
+      ATAC_bin,
+
+      # Value if the condition is FALSE
+      # This part extracts the chromosome and pastes it with the window start/end
+      paste0(sub(":.*", "", ATAC_bin), ":", window_start, "-", window_end)
+    )
+  )
+
+# Relocate the 'window' column
+modeling_results <- modeling_results %>%
+  relocate(window, .after = window_end)
+
+
+# Create a data frame for control bins, sorted alphabetically
+control_bins <- modeling_results %>%
+  filter(is.na(window_start)) %>%
+  arrange(window)
+
+# Create a data frame for experimental bins, sorted by genomic position
+experimental_bins <- modeling_results %>%
+  filter(!is.na(window_start)) %>%
+  arrange(window_start)
+
+# Combine the two sets to create the final, ordered list for the x-axis
+final_bin_order <- c(unique(control_bins$window), unique(experimental_bins$window))
+
+# Convert the 'window' column into an ordered factor
+modeling_results$window <- factor(modeling_results$window, levels = final_bin_order)
+
+# Convert the 'dose' column to a factor with numerically sorted levels
+# This will place the highest dose (100) at the top and the lowest (0) at the bottom.
+modeling_results$dose <- factor(
+  modeling_results$dose,
+  levels = sort(unique(modeling_results$dose), decreasing = TRUE)
+)
+
+modeling_results_raw <- modeling_results
+```
+
+
+```{r}
+# Calculate the value that 95% of the data is below (i.e., the top 5%)
+top_5_percent_threshold <- quantile(
+  abs(modeling_results$mean_normalized_effect),
+  probs = 0.95,
+  na.rm = TRUE
+)
+
+# Print the result
+print(top_5_percent_threshold)
+```
+
+
+```{r}
+# Make sure ggplot2 is loaded
+library(ggplot2)
+
+# Create the count-based histogram plot (no density line)
+p <- ggplot(modeling_results, aes(x = mean_normalized_effect)) +
+  # Add a histogram with counts on the y-axis (default)
+  geom_histogram(bins = 100, fill = "dimgrey", alpha = 0.7) +
+
+  # Add a vertical line for the lower threshold (-top 5%)
+  geom_vline(
+    xintercept = -top_5_percent_threshold,
+    color = "blue",
+    linetype = "dashed",
+    size = 1
+  ) +
+
+  # Add a vertical line for the upper threshold (+top 5%)
+  geom_vline(
+    xintercept = top_5_percent_threshold,
+    color = "red",
+    linetype = "dashed",
+    size = 1
+  ) +
+
+  # Add labels and a title
+  labs(
+    title = "Distribution of Mean Normalized Effect - 40 cell threshold",
+    x = "Mean Normalized Effect",
+    y = "Count",
+    caption = paste0("Dashed lines indicate (+/- ", round(top_5_percent_threshold, 3), ")")
+  ) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(size = 7),
+    axis.title.x = element_text(size = 7),
+    axis.title.y = element_text(size = 7),
+    axis.text.x = element_text(size = 6),
+    axis.text.y = element_text(size = 6),
+    plot.caption = element_text(size = 6)
+  )
+
+# Print the plot
+p
+
+# Save the plot as a PDF with specific dimensions and font sizes
+pdf_dir <- output_dir
+dir.create(pdf_dir, recursive = TRUE, showWarnings = FALSE)
+ggsave(
+  filename = file.path(pdf_dir, "40cells_dist_mean_norm_effect.pdf"),
+  plot = p,
+  width = 3.1,
+  height = 3.0,
+  units = "in"
+)
+
+# Clean up variables to prevent any side effects on downstream chunks
+rm(p, pdf_dir)
+```
+
+
+
+
+# --- 3. Interactive Lollipop Plots ---
+```{r}
+# --- 1. Load Libraries ---
+library(plotly)
+library(dplyr)
+library(htmlwidgets)
+
+# --- 2. Enhanced function to generate distinct colors ---
+generate_distinct_colors <- function(n) {
+  golden_ratio_conjugate <- 0.61803398875
+  h <- runif(1)
+  hues <- (h + (1:n) * golden_ratio_conjugate) %% 1
+  sv_pairs <- list(
+    c(s = 0.9, v = 0.85), c(s = 0.4, v = 0.95), c(s = 0.9, v = 0.6),
+    c(s = 0.25, v = 0.98), c(s = 0.7, v = 0.7)
+  )
+  s_values <- rep(sapply(sv_pairs, `[`, 1), length.out = n)
+  v_values <- rep(sapply(sv_pairs, `[`, 2), length.out = n)
+  hsv(h = hues, s = s_values, v = v_values)
+}
+
+# --- 3. Create a High-Contrast Master Color Key ---
+ordered_bins <- modeling_results %>%
+  arrange(window) %>%
+  pull(ATAC_bin) %>%
+  unique()
+num_bins <- length(ordered_bins)
+distinct_colors <- generate_distinct_colors(n = num_bins)
+atac_color_map <- data.frame(
+  ATAC_bin = ordered_bins,
+  bin_color = distinct_colors
+)
+
+# --- 4. Join the Color Map to the Main Dataframe ---
+if (!"bin_color" %in% names(modeling_results)) {
+  modeling_results <- modeling_results %>%
+    left_join(atac_color_map, by = "ATAC_bin")
+}
+
+# --- 5. Define the Custom Color Scale for Lollipops ---
+min_effect <- min(modeling_results$mean_normalized_effect, na.rm = TRUE)
+max_effect <- max(modeling_results$mean_normalized_effect, na.rm = TRUE)
+range_effect <- max_effect - min_effect
+
+# Calculate symmetrical limits for color scale based on ACTUAL data range
+actual_max_abs <- max(abs(range(modeling_results$mean_normalized_effect, na.rm = TRUE)))
+# Ensure we cover at least the cap to avoid errors
+actual_max_abs <- max(actual_max_abs, 1.5)
+
+# Define the cap and threshold
+cap_val <- 1.0
+thresh_val <- top_5_percent_threshold
+
+# Calculate normalized positions (0 to 1) for the gradient stops
+# The scale spans from -actual_max_abs to +actual_max_abs
+total_span <- 2 * actual_max_abs
+
+# Function to normalize a value to [0, 1] given the range [-actual_max_abs, actual_max_abs]
+norm_pos <- function(val) {
+  (val - (-actual_max_abs)) / total_span
+}
+
+v_neg_cap <- norm_pos(-cap_val)
+v_neg_thresh <- norm_pos(-thresh_val)
+v_pos_thresh <- norm_pos(thresh_val)
+v_pos_cap <- norm_pos(cap_val)
+
+# Create the custom colorscale: blue -> blue -> lightgrey -> lightgrey -> red -> red
+custom_colorscale <- list(
+  list(0, "blue"),
+  list(v_neg_cap, "blue"),
+  list(v_neg_thresh, "lightgrey"),
+  list(v_pos_thresh, "lightgrey"),
+  list(v_pos_cap, "red"),
+  list(1, "red")
+)
+
+# --- 6. Build the Header Plot ---
+header_data <- modeling_results %>%
+  dplyr::select(window, ATAC_bin, bin_color) %>%
+  distinct()
+p_header <- plot_ly(
+  data = header_data,
+  x = ~window, y = 1, type = "bar",
+  marker = list(color = ~bin_color),
+  hoverinfo = "text", text = ~ paste("ATAC Bin:", ATAC_bin)
+) %>% layout(yaxis = list(showticklabels = FALSE, title = ""))
+
+# --- 7. Build the Main Lollipop Plots ---
+dose_plots <- list()
+dose_levels <- levels(modeling_results$dose)
+for (d in dose_levels) {
+  dose_data <- filter(modeling_results, dose == d)
+  dose_data_na <- filter(dose_data, is.na(mean_normalized_effect))
+  dose_data_non_na <- filter(dose_data, !is.na(mean_normalized_effect))
+
+  p_dose <- plot_ly(showlegend = FALSE) %>%
+    add_segments(
+      data = dose_data_non_na,
+      x = ~window, y = 0, xend = ~window, yend = ~mean_normalized_effect,
+      color = I("gray"), hoverinfo = "none"
+    ) %>%
+    add_markers(
+      data = dose_data_non_na,
+      x = ~window, y = ~mean_normalized_effect,
+      marker = list(
+        color = ~mean_normalized_effect, colorscale = custom_colorscale,
+        cmin = -actual_max_abs, cmax = actual_max_abs,
+        showscale = (d == "100"),
+        colorbar = list(title = "Norm Effect"),
+        size = 10
+      ),
+      hoverinfo = "text", text = ~ paste0(
+        "Bin: ", ATAC_bin, "<br>",
+        "Window: ", window, "<br>",
+        "Scheme: ", window_scheme, "<br>",
+        "Effect: ", round(mean_normalized_effect, 3), "<br>",
+        "Adj. P-val: ", ifelse(is.na(adjusted_p_value), "NA", format.pval(adjusted_p_value, digits = 3)), "<br>",
+        "CI: ", round(conf_low_95, 3), " - ", round(conf_high_95, 3), "<br>",
+        "Cell Count: ", cell_count, "<br>",
+        "Unique sgRNAs: ", num_unique_sgrnas, "<br>",
+        "Status: ", status
+      )
+    ) %>%
+    add_markers(
+      data = dose_data_na, x = ~window, y = 0,
+      marker = list(color = "black", size = 10),
+      hoverinfo = "text", text = ~ paste0(
+        "Bin: ", ATAC_bin, "<br>",
+        "Window: ", window, "<br>",
+        "Scheme: ", window_scheme, "<br>",
+        "Effect: NA", "<br>",
+        "Adj. P-val: ", ifelse(is.na(adjusted_p_value), "NA", format.pval(adjusted_p_value, digits = 3)), "<br>",
+        "CI: ", round(conf_low_95, 3), " - ", round(conf_high_95, 3), "<br>",
+        "Cell Count: ", cell_count, "<br>",
+        "Unique sgRNAs: ", num_unique_sgrnas, "<br>",
+        "Status: ", status
+      )
+    ) %>%
+    add_annotations(
+      text = paste(d), x = 1, y = 0.5,
+      xref = "paper", yref = "paper",
+      xanchor = "left", showarrow = FALSE,
+      font = list(size = 14)
+    )
+  dose_plots[[as.character(d)]] <- p_dose
+}
+
+# --- 8. Combine All Plots and Enforce Order ---
+final_plot <- subplot(
+  p_header, dose_plots[["100"]], dose_plots[["50"]],
+  dose_plots[["10"]], dose_plots[["0"]],
+  nrows = 5, heights = c(0.1, 0.225, 0.225, 0.225, 0.225),
+  shareX = TRUE, titleY = TRUE
+) %>%
+  layout(
+    xaxis = list(
+      title = "Genomic Window",
+      categoryorder = "array",
+      categoryarray = final_bin_order,
+      tickangle = 60
+    ),
+    title = list(text = "Dose-Dependent Effect Across Genomic Windows-1000 bootstrap 150bp window", y = 0.99)
+  )
+
+# --- 9. Save the Final Interactive Plot ---
+htmlwidgets::saveWidget(
+  widget = final_plot,
+  file = file.path(output_dir, "cells40_all_modeling_results_interactive_lollipop_final.html")
+)
+```
+
+
+```{r}
+# --- 10. Save the Global Static Lollipop Plot (All Modeling Results) ---
+# This replicates the style of the significant windows version but for the complete dataset.
+
+# 1. Prepare Data using the full results set
+modeling_results_static_all <- modeling_results %>%
+  mutate(dose = factor(as.character(dose), levels = c("100", "50", "10", "0"))) %>%
+  mutate(window = factor(as.character(window), levels = final_bin_order))
+
+# 2. Calculate dynamic scale limits (based on ALL results)
+all_cell_range <- range(modeling_results_static_all$cell_count, na.rm = TRUE)
+min_all_cells <- all_cell_range[1]
+max_all_cells <- all_cell_range[2]
+
+# 3. Define the Color Scale (Using the same logic as the interactive plot)
+if (!exists("actual_max_abs") || is.null(actual_max_abs)) {
+  actual_max_abs <- max(abs(range(modeling_results_static_all$mean_normalized_effect, na.rm = TRUE)))
+  actual_max_abs <- max(actual_max_abs, 1.5)
+}
+cap_val_all <- 1.0
+thresh_val_all <- top_5_percent_threshold
+total_span_all <- 2 * actual_max_abs
+
+norm_pos_all <- function(val) {
+  (val - (-actual_max_abs)) / total_span_all
+}
+
+v_neg_cap_all <- norm_pos_all(-cap_val_all)
+v_neg_thresh_all <- norm_pos_all(-thresh_val_all)
+v_pos_thresh_all <- norm_pos_all(thresh_val_all)
+v_pos_cap_all <- norm_pos_all(cap_val_all)
+
+# 4. Create the Static Lollipop Plot
+p_lollipop_all_static <- ggplot(modeling_results_static_all, aes(x = window)) +
+  geom_linerange(
+    data = subset(modeling_results_static_all, !is.na(mean_normalized_effect)),
+    aes(ymin = 0, ymax = mean_normalized_effect),
+    color = "gray"
+  ) +
+  geom_point(
+    data = subset(modeling_results_static_all, !is.na(mean_normalized_effect)),
+    aes(y = mean_normalized_effect, color = mean_normalized_effect),
+    size = 2.0, alpha = 0.9
+  ) +
+  geom_point(
+    data = subset(modeling_results_static_all, is.na(mean_normalized_effect)),
+    aes(y = 0),
+    color = "black",
+    size = 2.0
+  ) +
+  facet_grid(dose ~ ., switch = "y", labeller = as_labeller(function(x) paste0(x, "~mu*'M'"), default = label_parsed)) +
+  scale_color_gradientn(
+    colors = c("blue", "blue", "lightgrey", "lightgrey", "red", "red"),
+    values = c(0, v_neg_cap_all, v_neg_thresh_all, v_pos_thresh_all, v_pos_cap_all, 1),
+    limits = c(-actual_max_abs, actual_max_abs),
+    name = expression(beta[coef])
+  ) +
+  # Differentiate legend font sizes
+  guides(
+    color = guide_colorbar(title.theme = element_text(size = 14))
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 9),
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    strip.text.y.left = element_text(angle = 90, size = 13), # Vertical dose labels
+    strip.placement = "outside",
+    legend.text = element_text(size = 10),
+    legend.position = "right",
+    panel.spacing = unit(1, "cm"),
+    plot.margin = margin(t = 0, r = 0, b = 1, l = 0, unit = "cm")
+  ) +
+  labs(y = NULL) +
+  scale_x_discrete(limits = final_bin_order, drop = FALSE) +
+  coord_cartesian(expand = FALSE, clip = "off")
+
+# 5. Create Header (Matches the interactive p_header but in ggplot)
+header_data_static_all <- header_data %>%
+  mutate(window = factor(as.character(window), levels = final_bin_order))
+
+p_header_static_all <- ggplot(header_data_static_all, aes(x = window, y = 1, fill = ATAC_bin)) +
+  geom_tile() +
+  scale_fill_manual(values = setNames(header_data_static_all$bin_color, header_data_static_all$ATAC_bin)) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.title.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    legend.position = "none",
+    plot.margin = margin(b = 0, unit = "cm")
+  ) +
+  coord_cartesian(expand = FALSE)
+
+# 6. Combine and Save
+if (requireNamespace("patchwork", quietly = TRUE)) {
+  library(patchwork)
+  combined_lollipop_all_static <- p_header_static_all / p_lollipop_all_static +
+    plot_layout(heights = c(1, 10), guides = "collect")
+} else {
+  library(gridExtra)
+  combined_lollipop_all_static <- grid.arrange(p_header_static_all, p_lollipop_all_static, ncol = 1, heights = c(1, 10))
+}
+
+ggsave(
+  filename = file.path(output_dir, "cells40_all_modeling_results_static_lollipop_final.pdf"),
+  plot = combined_lollipop_all_static,
+  width = 15, height = 10
+)
+
+ggsave(
+  filename = file.path(output_dir, "cells40_all_modeling_results_static_lollipop_final.png"),
+  plot = combined_lollipop_all_static,
+  width = 15, height = 10, dpi = 300
+)
+```
+
+
+
+```{r}
+head(modeling_results)
+```
+
+
+
+
+
+# --- 11. Filtering ---
+# Filter by mean_normalized_effect threshold and confidence intervals for successive bins.
+
+```{r}
+# Set threshold for the entire script
+mean_norm_effect_threshold <- top_5_percent_threshold
+```
+
+```{r}
+library(dplyr)
+
+# The result is assigned to the new dataframe name
+modeling_results_conf_int <- modeling_results %>%
+  mutate(
+    confidence_interval_contain_zero = if_else(
+      # This condition checks if the two numbers cross zero
+      conf_low_95 * conf_high_95 <= 0,
+
+      # Value if TRUE (they have different signs or one is zero)
+      "yes_contains_0",
+
+      # Value if FALSE (they have the same sign)
+      "NO"
+    )
+  )
+
+# Check the first few rows of the new dataframe
+head(modeling_results_conf_int)
+```
+
+
+
+
+
+# Keep only sliding windows that pass the confidence interval and effect thresholds for at least two adjacent windows
+```{r}
+# --- Part 1: Filtering to create 'significant_windows_only' dataframe ---
+# (This section assumes your 'modeling_results_conf_int' dataframe is available)
+sliding_windows_to_keep <- modeling_results_conf_int %>%
+  filter(window_scheme == "sliding_window") %>%
+  group_by(ATAC_bin, dose) %>%
+  arrange(window_start) %>%
+  filter(
+    (
+      (abs(mean_normalized_effect) >= mean_norm_effect_threshold & confidence_interval_contain_zero == "NO") &
+        (abs(lead(mean_normalized_effect)) >= mean_norm_effect_threshold & lead(confidence_interval_contain_zero) == "NO")
+    ) |
+      (
+        (abs(mean_normalized_effect) >= mean_norm_effect_threshold & confidence_interval_contain_zero == "NO") &
+          (abs(lag(mean_normalized_effect)) >= mean_norm_effect_threshold & lag(confidence_interval_contain_zero) == "NO")
+      )
+  ) %>%
+  ungroup() %>%
+  pull(window) %>%
+  unique()
+
+small_windows_to_keep <- modeling_results_conf_int %>%
+  filter(window_scheme == "small_window") %>%
+  filter(abs(mean_normalized_effect) >= mean_norm_effect_threshold & confidence_interval_contain_zero == "NO") %>%
+  pull(window) %>%
+  unique()
+
+control_windows_to_keep <- modeling_results_conf_int %>%
+  filter(window_scheme == "NA_control_window") %>%
+  filter(abs(mean_normalized_effect) >= mean_norm_effect_threshold & confidence_interval_contain_zero == "NO") %>%
+  pull(window) %>%
+  unique()
+
+all_windows_to_keep <- c(
+  sliding_windows_to_keep,
+  small_windows_to_keep,
+  control_windows_to_keep
+) %>%
+  unique()
+
+significant_windows_only_w_random_controls <- modeling_results_conf_int %>%
+  filter(window %in% all_windows_to_keep)
+
+significant_windows_only <- significant_windows_only_w_random_controls %>%
+  filter(ATAC_bin != "random.controls")
+
+# --- 2. Prepare the 'significant_windows_only' Data for Plotting ---
+control_bins_sig <- significant_windows_only %>%
+  filter(is.na(window_start)) %>%
+  arrange(window)
+experimental_bins_sig <- significant_windows_only %>%
+  filter(!is.na(window_start)) %>%
+  arrange(window_start)
+final_bin_order_sig <- c(
+  unique(control_bins_sig$window),
+  unique(experimental_bins_sig$window)
+)
+significant_windows_only$window <- factor(
+  significant_windows_only$window,
+  levels = final_bin_order_sig
+)
+significant_windows_only$dose <- factor(
+  significant_windows_only$dose,
+  levels = sort(unique(significant_windows_only$dose), decreasing = TRUE)
+)
+
+# --- 3. Load Manual Coloring from CSV ---
+# We now use pre-assigned colors for global consistency
+manual_colors_path <- "../data/ATAC_bin_color_map/manual_colors_ATAC_bins.csv"
+manual_colors_df <- read.csv(manual_colors_path, stringsAsFactors = FALSE)
+
+# Create the color map using ATAC_bin and final_colors from the CSV
+atac_color_map <- manual_colors_df %>%
+  dplyr::select(ATAC_bin, bin_color = final_colors) %>%
+  distinct()
+# Force update of bin_color to use the new colors generated for the filtered set
+if ("bin_color" %in% names(significant_windows_only)) {
+  significant_windows_only <- significant_windows_only %>% dplyr::select(-bin_color)
+}
+
+significant_windows_only <- significant_windows_only %>%
+  left_join(atac_color_map, by = "ATAC_bin")
+
+# Export significant ATAC bins with colors for audit and comparison
+atac_bin_color_map_for_audit <- significant_windows_only %>%
+  dplyr::select(ATAC_bin, bin_color) %>%
+  distinct()
+
+write.csv(atac_bin_color_map_for_audit,
+  file = file.path(output_dir, "significant_atac_bins_40cells_w_colors.csv"),
+  row.names = FALSE
+)
+
+write.csv(significant_windows_only,
+  file = file.path(output_dir, "significant_windows_only_40cells.csv"),
+  row.names = FALSE
+)
+
+write.csv(modeling_results_conf_int,
+  file = file.path(output_dir, "modeling_results_conf_int_40cells.csv"),
+  row.names = FALSE
+)
+
+# --- 4. Define the Custom Color Scale ---
+# Calculate symmetrical limits for color scale based on ACTUAL data range
+actual_max_abs <- max(abs(range(significant_windows_only$mean_normalized_effect, na.rm = TRUE)))
+# Ensure we cover at least the cap to avoid errors
+actual_max_abs <- max(actual_max_abs, 1.5)
+
+# Define the cap and threshold
+cap_val <- 1.0
+thresh_val <- mean_norm_effect_threshold
+
+# Calculate normalized positions (0 to 1) for the gradient stops
+# The scale spans from -actual_max_abs to +actual_max_abs
+total_span <- 2 * actual_max_abs
+
+# Function to normalize a value to [0, 1] given the range [-actual_max_abs, actual_max_abs]
+norm_pos <- function(val) {
+  (val - (-actual_max_abs)) / total_span
+}
+
+v_neg_cap <- norm_pos(-cap_val)
+v_neg_thresh <- norm_pos(-thresh_val)
+v_pos_thresh <- norm_pos(thresh_val)
+v_pos_cap <- norm_pos(cap_val)
+
+# Create the custom colorscale: blue -> blue -> lightgrey -> lightgrey -> red -> red
+custom_colorscale <- list(
+  list(0, "blue"),
+  list(v_neg_cap, "blue"),
+  list(v_neg_thresh, "lightgrey"),
+  list(v_pos_thresh, "lightgrey"),
+  list(v_pos_cap, "red"),
+  list(1, "red")
+)
+
+# --- 5. Build the Header and Lollipop Plots ---
+header_data <- significant_windows_only %>%
+  dplyr::select(window, ATAC_bin, bin_color) %>%
+  distinct()
+p_header <- plot_ly(
+  data = header_data, x = ~window, y = 1, type = "bar",
+  marker = list(color = ~bin_color),
+  hoverinfo = "text", text = ~ paste("ATAC Bin:", ATAC_bin)
+) %>%
+  layout(yaxis = list(showticklabels = FALSE, title = ""))
+
+dose_plots <- list()
+dose_levels <- levels(significant_windows_only$dose)
+
+for (d in dose_levels) {
+  dose_data <- filter(significant_windows_only, dose == d)
+  dose_data_na <- filter(dose_data, is.na(mean_normalized_effect))
+  dose_data_non_na <- filter(dose_data, !is.na(mean_normalized_effect))
+
+  p_dose <- plot_ly(showlegend = FALSE) %>%
+    add_segments(
+      data = dose_data_non_na, x = ~window, y = 0,
+      xend = ~window, yend = ~mean_normalized_effect,
+      color = I("gray"), hoverinfo = "none"
+    ) %>%
+    add_markers(
+      data = dose_data_non_na, x = ~window, y = ~mean_normalized_effect,
+      marker = list(
+        color = ~mean_normalized_effect, colorscale = custom_colorscale,
+        cmin = -actual_max_abs, cmax = actual_max_abs,
+        showscale = (d == "100"),
+        colorbar = list(title = "Norm Effect"),
+        size = 10
+      ),
+      hoverinfo = "text",
+      # Create a detailed, multi-line tooltip
+      text = ~ paste0(
+        "Bin: ", ATAC_bin, "<br>",
+        "Window: ", window, "<br>",
+        "Scheme: ", window_scheme, "<br>",
+        "Effect: ", round(mean_normalized_effect, 3), "<br>",
+        "Adj. P-val: ", ifelse(is.na(adjusted_p_value), "NA", format.pval(adjusted_p_value, digits = 3)), "<br>",
+        "CI: ", round(conf_low_95, 3), " - ", round(conf_high_95, 3), "<br>",
+        "CI contains 0: ", confidence_interval_contain_zero, "<br>",
+        "Cell Count: ", cell_count, "<br>",
+        "Unique sgRNAs: ", num_unique_sgrnas, "<br>",
+        "Status: ", status
+      )
+    ) %>%
+    add_markers(
+      data = dose_data_na, x = ~window, y = 0,
+      marker = list(color = "black", size = 10),
+      hoverinfo = "text",
+      # Create a similar tooltip for NA values
+      text = ~ paste0(
+        "Bin: ", ATAC_bin, "<br>",
+        "Window: ", window, "<br>",
+        "Scheme: ", window_scheme, "<br>",
+        "Effect: NA", "<br>",
+        "Adj. P-val: ", ifelse(is.na(adjusted_p_value), "NA", format.pval(adjusted_p_value, digits = 3)), "<br>",
+        "CI: ", round(conf_low_95, 3), " - ", round(conf_high_95, 3), "<br>",
+        "CI contains 0: ", confidence_interval_contain_zero, "<br>",
+        "Cell Count: ", cell_count, "<br>",
+        "Unique sgRNAs: ", num_unique_sgrnas, "<br>",
+        "Status: ", status
+      )
+    ) %>%
+    add_annotations(
+      text = paste(d), x = 1, y = 0.5,
+      xref = "paper", yref = "paper",
+      xanchor = "left", showarrow = FALSE,
+      font = list(size = 14)
+    )
+
+  dose_plots[[as.character(d)]] <- p_dose
+}
+
+# --- 6. Combine All Plots and Enforce Order ---
+final_plot_significant <- subplot(
+  p_header, dose_plots[["100"]], dose_plots[["50"]],
+  dose_plots[["10"]], dose_plots[["0"]],
+  nrows = 5, heights = c(0.1, 0.225, 0.225, 0.225, 0.225),
+  shareX = TRUE, titleY = TRUE
+) %>%
+  layout(
+    xaxis = list(
+      title = "Genomic Window",
+      categoryorder = "array",
+      categoryarray = final_bin_order_sig, # Use the new order for significant windows
+      tickangle = 60
+    ),
+    title = list(text = "Dose-Dependent Effect for Significant Windows Only_detailed hover_FINAL", y = 0.99)
+  )
+
+# --- 7. Save the Final Interactive Plot ---
+htmlwidgets::saveWidget(
+  widget = final_plot_significant,
+  file = file.path(output_dir, "cells40_interactive_lollipop_nominal_hit_windows_detailed_hover_FINAL.html")
+)
+```
+
+
+
+
+
+
+
+# Calculate number of sgRNAs from significant windows
+```{r}
+# You may need to install tidyr if you don't have it: install.packages("tidyr")
+library(tidyr)
+library(dplyr)
+
+all_sgRNA_across_significant_windows <- significant_windows_only %>%
+  # 1. Select only the columns we need
+  dplyr::select(ATAC_bin, window, window_start, window_end, sgRNA_per_window) %>%
+  # 2. Split the sgRNA string and create new rows
+  # This is the key step that does all the work
+  tidyr::separate_rows(sgRNA_per_window, sep = ",") %>%
+  # 3. Rename the column to your desired name
+  dplyr::rename(sgRNA.sequence = sgRNA_per_window)
+
+write.csv(all_sgRNA_across_significant_windows,
+  file = file.path(output_dir, "all_sgRNA_across_significant_windows_40cells.csv"),
+  row.names = FALSE
+)
+
+# View the final formatted table
+head(all_sgRNA_across_significant_windows)
+
+# Get the final count of unique sgRNAs
+num_unique_sgrnas <- length(unique(all_sgRNA_across_significant_windows$sgRNA.sequence))
+
+print(paste("Total number of unique sgRNAs across all significant windows (excluding random.controls):", num_unique_sgrnas))
+```
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+# --- Static Heatmap ---
+library(ggplot2)
+# Try to load patchwork, if not available, we might need another method,
+# but assuming it's available or we can use gridExtra.
+# For robustness, I'll check if patchwork is installed, otherwise use grid.
+if (!requireNamespace("patchwork", quietly = TRUE)) {
+  if (!requireNamespace("gridExtra", quietly = TRUE)) {
+    stop("Please install 'patchwork' or 'gridExtra' to generate the static heatmap.")
+  }
+  library(gridExtra)
+  use_patchwork <- FALSE
+} else {
+  library(patchwork)
+  use_patchwork <- TRUE
+}
+
+# 1. Prepare Data
+# Reuse significant_windows_only from previous chunks
+static_data <- significant_windows_only
+
+# Ensure factors are set
+static_data$window <- factor(static_data$window, levels = final_bin_order_sig)
+static_data$dose <- factor(static_data$dose, levels = sort(unique(static_data$dose), decreasing = FALSE))
+
+# 2. Header Plot
+# We need a dataframe with one row per window for the header
+header_data_static <- static_data %>%
+  dplyr::select(window, ATAC_bin, bin_color) %>%
+  distinct()
+
+p_header_static <- ggplot(header_data_static, aes(x = window, y = 1, fill = ATAC_bin)) +
+  geom_tile() +
+  scale_fill_manual(values = setNames(atac_color_map$bin_color, atac_color_map$ATAC_bin)) +
+  theme_void() +
+  theme(
+    legend.position = "none",
+    plot.margin = margin(b = 0, unit = "cm"),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank()
+  ) +
+  coord_cartesian(expand = FALSE)
+```
+
+
+```{r}
+# --- Static Lollipop Plot (Replicating Interactive Style) ---
+
+# 1. Prepare Data (Reuse static_data)
+# Ensure dose is a factor with correct order (reversed for top-to-bottom: 100, 50, 10, 0)
+# Use as.character to ensure we match the levels correctly regardless of input type
+static_data_lolli <- static_data %>%
+  mutate(dose = factor(as.character(dose), levels = c("100", "50", "10", "0")))
+
+# 2. Define Color Scale (Reuse logic)
+# We need to re-calculate these if they aren't in scope, or just use them.
+# To be safe, let's re-define the scale parameters based on the data.
+
+actual_max_abs_lolli <- max(abs(range(static_data$mean_normalized_effect, na.rm = TRUE)))
+actual_max_abs_lolli <- max(actual_max_abs_lolli, 1.5)
+cap_val_lolli <- 1.0
+thresh_val_lolli <- mean_norm_effect_threshold
+total_span_lolli <- 2 * actual_max_abs_lolli
+
+norm_pos_lolli <- function(val) {
+  (val - (-actual_max_abs_lolli)) / total_span_lolli
+}
+
+v_neg_cap_lolli <- norm_pos_lolli(-cap_val_lolli)
+v_neg_thresh_lolli <- norm_pos_lolli(-thresh_val_lolli)
+v_pos_thresh_lolli <- norm_pos_lolli(thresh_val_lolli)
+v_pos_cap_lolli <- norm_pos_lolli(cap_val_lolli)
+
+# 3. Create Lollipop Plot
+# 3. Create Lollipop Plot
+p_lollipop_static <- ggplot(static_data_lolli, aes(x = window)) +
+  # Stems (grey)
+  geom_segment(
+    data = subset(static_data_lolli, !is.na(mean_normalized_effect)),
+    aes(xend = window, y = 0, yend = mean_normalized_effect),
+    color = "gray"
+  ) +
+  # Points (colored by effect)
+  geom_point(
+    data = subset(static_data_lolli, !is.na(mean_normalized_effect)),
+    aes(y = mean_normalized_effect, color = mean_normalized_effect),
+    size = 2.0
+  ) +
+  # NA values (points at 0, #CCCCCC)
+  geom_point(
+    data = subset(static_data_lolli, is.na(mean_normalized_effect)),
+    aes(y = 0),
+    color = "black",
+    size = 2.0
+  ) +
+  # Facet by Dose (stacked vertically) with microMolar unit mathematically parsed
+  facet_grid(dose ~ ., switch = "y", labeller = as_labeller(function(x) paste0(x, "~mu*'M'"), default = label_parsed)) +
+  # Custom Color Scale
+  scale_color_gradientn(
+    colors = c("blue", "blue", "lightgrey", "lightgrey", "red", "red"),
+    values = c(0, v_neg_cap_lolli, v_neg_thresh_lolli, v_pos_thresh_lolli, v_pos_cap_lolli, 1),
+    limits = c(-actual_max_abs_lolli, actual_max_abs_lolli),
+    name = expression(beta[coef])
+  ) +
+  # Differentiate legend font sizes
+  guides(
+    color = guide_colorbar(title.theme = element_text(size = 14))
+  ) +
+  # Theme and Layout
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 9),
+    axis.text.x = element_blank(), # Hide x-axis labels (shared with header)
+    axis.title.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    strip.text.y.left = element_text(angle = 90, size = 13), # Vertical dose labels
+    strip.placement = "outside",
+    legend.text = element_text(size = 10),
+    legend.position = "right",
+    panel.spacing = unit(1, "cm"), # Increase spacing between facets
+    plot.margin = margin(t = 0, r = 1, b = 1, l = 1, unit = "cm") # Add margin for clipped points
+  ) +
+  labs(y = NULL) +
+  coord_cartesian(expand = FALSE, clip = "off") # Allow points to extend beyond panel
+
+# 4. Combine with Header (p_header_static from heatmap chunk)
+if (use_patchwork) {
+  combined_lollipop_static <- p_header_static / p_lollipop_static +
+    plot_layout(heights = c(1, 10), guides = "collect")
+} else {
+  combined_lollipop_static <- grid.arrange(p_header_static, p_lollipop_static, ncol = 1, heights = c(1, 10))
+}
+
+# 5. Save
+ggsave(
+  filename = file.path(output_dir, "cells40_static_lollipop_significant_windows.pdf"),
+  plot = combined_lollipop_static,
+  width = 12, height = 8 # Slightly taller for lollipops
+)
+
+ggsave(
+  filename = file.path(output_dir, "cells40_static_lollipop_significant_windows.png"),
+  plot = combined_lollipop_static,
+  width = 12, height = 8, dpi = 300
+)
+```
+
+```{r}
+# --- Static Lollipop Plot Scaled to Cell Number ---
+
+# 1. Prepare Data (Reuse static_data)
+# Ensure dose is a factor with correct order (reversed for top-to-bottom: 100, 50, 10, 0)
+# Use as.character to ensure we match the levels correctly regardless of input type
+static_data_lolli <- static_data %>%
+  mutate(dose = factor(as.character(dose), levels = c("100", "50", "10", "0")))
+
+# --- Step 1: Calculate Dynamic Limits ---
+sig_cell_range <- range(significant_windows_only$cell_count, na.rm = TRUE)
+min_sig_cells <- sig_cell_range[1]
+max_sig_cells <- sig_cell_range[2]
+
+# 2. Define Color Scale (Reuse logic)
+# We need to re-calculate these if they aren't in scope, or just use them.
+# To be safe, let's re-define the scale parameters based on the data.
+
+actual_max_abs_lolli <- max(abs(range(static_data$mean_normalized_effect, na.rm = TRUE)))
+actual_max_abs_lolli <- max(actual_max_abs_lolli, 1.5)
+cap_val_lolli <- 1.0
+thresh_val_lolli <- mean_norm_effect_threshold
+total_span_lolli <- 2 * actual_max_abs_lolli
+
+norm_pos_lolli <- function(val) {
+  (val - (-actual_max_abs_lolli)) / total_span_lolli
+}
+
+v_neg_cap_lolli <- norm_pos_lolli(-cap_val_lolli)
+v_neg_thresh_lolli <- norm_pos_lolli(-thresh_val_lolli)
+v_pos_thresh_lolli <- norm_pos_lolli(thresh_val_lolli)
+v_pos_cap_lolli <- norm_pos_lolli(cap_val_lolli)
+
+# 3. Create Lollipop Plot
+p_lollipop_static <- ggplot(static_data_lolli, aes(x = window)) +
+  # Stems (grey)
+  geom_segment(
+    data = subset(static_data_lolli, !is.na(mean_normalized_effect)),
+    aes(xend = window, y = 0, yend = mean_normalized_effect),
+    color = "gray"
+  ) +
+  # Points (colored by effect, sized by cell count) [Step 2]
+  geom_point(
+    data = subset(static_data_lolli, !is.na(mean_normalized_effect)),
+    aes(y = mean_normalized_effect, color = mean_normalized_effect, size = cell_count),
+    alpha = 0.9
+  ) +
+  # NA values (points at 0, #CCCCCC)
+  geom_point(
+    data = subset(static_data_lolli, is.na(mean_normalized_effect)),
+    aes(y = 0, size = cell_count),
+    color = "black"
+  ) +
+  # Facet by Dose (stacked vertically) with microMolar unit mathematically parsed
+  facet_grid(dose ~ ., switch = "y", labeller = as_labeller(function(x) paste0(x, "~mu*'M'"), default = label_parsed)) +
+  # Custom Color Scale
+  scale_color_gradientn(
+    colors = c("blue", "blue", "lightgrey", "lightgrey", "red", "red"),
+    values = c(0, v_neg_cap_lolli, v_neg_thresh_lolli, v_pos_thresh_lolli, v_pos_cap_lolli, 1),
+    limits = c(-actual_max_abs_lolli, actual_max_abs_lolli),
+    name = expression(beta[coef])
+  ) +
+  # --- Step 3: Define the Size Scale ---
+  scale_size_continuous(
+    limits = c(min_sig_cells, max_sig_cells),
+    range  = c(1, 6), # Adjust 6 if the dots for MSH2 look too "crowded"
+    name   = "Cell\ncount",
+    breaks = c(min_sig_cells, 500, 1000, max_sig_cells)
+  ) +
+  # Differentiate legend font sizes
+  guides(
+    color = guide_colorbar(title.theme = element_text(size = 14)),
+    size = guide_legend(title.theme = element_text(size = 12))
+  ) +
+  # Theme and Layout
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 9), # Explicitly size the effect size tick markers
+    axis.text.x = element_blank(), # Hide x-axis labels (shared with header)
+    axis.title.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    strip.text.y.left = element_text(angle = 90, size = 13), # Vertical dose labels
+    strip.placement = "outside",
+    legend.text = element_text(size = 10),
+    legend.position = "right",
+    panel.spacing = unit(1, "cm"), # Increase spacing between facets
+    plot.margin = margin(t = 0, r = 1, b = 1, l = 1, unit = "cm") # Add margin for clipped points
+  ) +
+  labs(y = NULL) +
+  coord_cartesian(expand = FALSE, clip = "off") # Allow points to extend beyond panel
+
+# 4. Combine with Header (p_header_static from heatmap chunk)
+if (use_patchwork) {
+  combined_lollipop_static <- p_header_static / p_lollipop_static +
+    plot_layout(heights = c(1, 10), guides = "collect")
+} else {
+  combined_lollipop_static <- grid.arrange(p_header_static, p_lollipop_static, ncol = 1, heights = c(1, 10))
+}
+
+# 5. Save
+ggsave(
+  filename = file.path(output_dir, "40cell_threshold_cell_number_static_lollipop_significant_windows.pdf"),
+  plot = combined_lollipop_static,
+  width = 12, height = 8 # Slightly taller for lollipops
+)
+
+ggsave(
+  filename = file.path(output_dir, "40cell_threshold_cell_number_static_lollipop_significant_windows.png"),
+  plot = combined_lollipop_static,
+  width = 12, height = 8, dpi = 300
+)
+```
+

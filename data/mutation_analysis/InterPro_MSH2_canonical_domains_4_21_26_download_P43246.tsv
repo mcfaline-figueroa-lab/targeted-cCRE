@@ -1,0 +1,31 @@
+Accession	Name	Short Name	Source Database	Type	Integrated Into	Integrated Signatures	GO Terms	Protein Accession	Protein Length	Matches
+cd03285	ATP-binding cassette domain of eukaryotic MutS2 homolog	ABC_MSH2_euk	cdd	domain	IPR032642			p43246	934	633..852
+G3DSA:1.10.1420.10			cathgene3d	homologous_superfamily				p43246	934	300..506,513..619
+G3DSA:3.30.420.110	MutS, connector domain		cathgene3d	homologous_superfamily	IPR036678			p43246	934	125..297
+G3DSA:3.40.1170.10	DNA repair protein MutS, domain I		cathgene3d	homologous_superfamily	IPR016151			p43246	934	1..124
+G3DSA:3.40.50.300	P-loop containing nucleotide triphosphate hydrolases		cathgene3d	homologous_superfamily	IPR027417			p43246	934	620..934
+IPR000432	DNA mismatch repair protein MutS, C-terminal	DNA_mismatch_repair_MutS_C	interpro	domain		PS00486,PF00488,SM00534	GO:0005524,GO:0030983,GO:0006298	p43246	934	662..852
+IPR007695	DNA mismatch repair protein MutS-like, N-terminal	DNA_mismatch_repair_MutS-lik_N	interpro	domain		PF01624	GO:0005524,GO:0030983,GO:0006298	p43246	934	18..131
+IPR007696	DNA mismatch repair protein MutS, core	DNA_mismatch_repair_MutS_core	interpro	domain		PF05192,SM00533	GO:0005524,GO:0030983,GO:0006298	p43246	934	305..645
+IPR007860	DNA mismatch repair protein MutS, connector domain	DNA_mmatch_repair_MutS_con_dom	interpro	domain		PF05188	GO:0005524,GO:0030983,GO:0006298	p43246	934	156..288
+IPR007861	DNA mismatch repair protein MutS, clamp	DNA_mismatch_repair_MutS_clamp	interpro	domain		PF05190	GO:0005524,GO:0030983,GO:0006298	p43246	934	474..568
+IPR011184	DNA mismatch repair Msh2-type	DNA_mismatch_repair_Msh2	interpro	family		PIRSF005813	GO:0005524,GO:0030983,GO:0006298	p43246	934	4..920
+IPR016151	DNA mismatch repair protein MutS, N-terminal	DNA_mismatch_repair_MutS_N	interpro	homologous_superfamily		G3DSA:3.40.1170.10,SSF55271	GO:0005524,GO:0030983,GO:0006298	p43246	934	1..124
+IPR027417	P-loop containing nucleoside triphosphate hydrolase	P-loop_NTPase	interpro	homologous_superfamily		G3DSA:3.40.50.300,SSF52540		p43246	934	619..934
+IPR032642	DNA mismatch repair protein Msh2, ATP-binding cassette domain	Msh2_ATP-bd	interpro	domain		cd03285	GO:0005524	p43246	934	633..852
+IPR036187	DNA mismatch repair protein MutS, core domain superfamily	DNA_mismatch_repair_MutS_sf	interpro	homologous_superfamily		SSF48334		p43246	934	303..613
+IPR036678	MutS, connector domain superfamily	MutS_con_dom_sf	interpro	homologous_superfamily		G3DSA:3.30.420.110,SSF53150	GO:0005524,GO:0030983,GO:0006298	p43246	934	125..297
+IPR045076	DNA mismatch repair MutS	MutS	interpro	family		PTHR48466,PTHR11361	GO:0005524,GO:0030983,GO:0140664,GO:0006298	p43246	934	48..910
+NF003810	DNA mismatch repair protein MutS	PRK05399.1	ncbifam	family				p43246	934	36..848
+PF00488	MutS domain V	MutS_V	pfam	domain	IPR000432			p43246	934	666..852
+PF01624	MutS domain I	MutS_I	pfam	domain	IPR007695			p43246	934	18..131
+PF05188	MutS domain II	MutS_II	pfam	domain	IPR007860			p43246	934	156..288
+PF05190	MutS family domain IV	MutS_IV	pfam	domain	IPR007861			p43246	934	474..568
+PF05192	MutS domain III	MutS_III	pfam	domain	IPR007696			p43246	934	305..473,569..609
+PIRSF005813	DNA mismatch repair protein, eukaryotic MSH2 type	MSH2	pirsf	family	IPR011184			p43246	934	4..920
+PS00486	DNA mismatch repair proteins mutS family signature	DNA_MISMATCH_REPAIR_2	prosite	conserved_site	IPR000432			p43246	934	743..759
+PTHR11361	DNA MISMATCH REPAIR PROTEIN MUTS FAMILY MEMBER		panther	family	IPR045076			p43246	934	48..910
+SM00533	DNA-binding domain of DNA mismatch repair MUTS family	MUTSd	smart	domain	IPR007696			p43246	934	321..645
+SM00534	ATPase domain of DNA mismatch repair MUTS family	MUTSac	smart	domain	IPR000432			p43246	934	662..849
+SSF48334	DNA repair protein MutS, domain III		ssf	homologous_superfamily	IPR036187			p43246	934	303..613
+SSF52540	P-loop containing nucleoside triphosphate hydrolases		ssf	homologous_superfamily	IPR027417			p43246	934	619..853

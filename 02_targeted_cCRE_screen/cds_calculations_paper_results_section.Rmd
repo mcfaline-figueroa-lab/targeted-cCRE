@@ -1,0 +1,163 @@
+---
+title: "CDS Calculations for Paper Results"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(monocle3)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+library(gridExtra)
+library(grid)
+```
+
+## Load the Final KRAB CDS Object
+
+```{r load_data}
+cds_path <- "./outputs/targeted_cCRE_combined_cds_all_genes_final.RDS"
+
+full_experiment_cds <- readRDS(cds_path)
+```
+
+## Preliminary Checks
+
+```{r check_metadata}
+cds_column_data <- colData(full_experiment_cds) %>% as.data.frame()
+nrow(cds_column_data)
+```
+Calculate the number of distinct sgRNAs detected in the targeted cCRE experiment:
+```{r}
+sgRNA_distinct <- length(unique(cds_column_data$sgRNA))
+sgRNA_distinct
+
+sgRNA_sequence_distinct <- length(unique(cds_column_data$sgRNA.sequence))
+sgRNA_sequence_distinct
+
+sgRNA_distinct == sgRNA_sequence_distinct
+```
+Calculate the total number of distinct genetic and chemical perturbations in the experiment:
+```{r}
+gxe_perturbations <- sgRNA_distinct * length(unique(cds_column_data$dose))
+gxe_perturbations
+
+gxe_perturbations == sgRNA_distinct*4
+```
+
+## Cell Counts per Dose
+
+```{r cell_counts_per_dose}
+# Count number of cells per dose
+cells_per_dose <- cds_column_data %>%
+  group_by(dose) %>%
+  summarise(n_cells = n(), .groups = 'drop')
+
+# Calculate median and mean number of cells per dose
+median_cells_per_dose <- median(cells_per_dose$n_cells)
+mean_cells_per_dose <- mean(cells_per_dose$n_cells)
+
+# Format the table for printing and saving as a PDF
+cells_per_dose_table <- cells_per_dose %>%
+  mutate(dose = factor(dose, levels = c(0, 10, 50, 100))) %>%
+  arrange(dose) %>%
+  rename("TMZ dose (μM)" = dose, "cell count" = n_cells)
+
+print(cells_per_dose_table)
+
+print(paste("Median number of cells per dose:", median_cells_per_dose))
+print(paste("Mean number of cells per dose:", mean_cells_per_dose))
+
+tg <- tableGrob(cells_per_dose_table, theme = ttheme_default(base_size = 7))
+width_in <- convertWidth(sum(tg$widths), "inches", valueOnly = TRUE)
+height_in <- convertHeight(sum(tg$heights), "inches", valueOnly = TRUE)
+
+cairo_pdf("./outputs/plots/cell_counts_per_dose.pdf", width = width_in + 0.2, height = height_in + 0.2)
+grid.newpage()
+grid.draw(tg)
+dev.off()
+```
+
+## Cell Counts per sgRNA
+
+```{r cell_counts_per_sgrna}
+# Count number of cells per sgRNA
+cells_per_sgrna <- cds_column_data %>%
+  group_by(sgRNA) %>%
+  summarise(n_cells = n(), .groups = 'drop')
+
+# Calculate median and mean number of cells per sgRNA
+median_cells_per_sgrna <- median(cells_per_sgrna$n_cells)
+mean_cells_per_sgrna <- mean(cells_per_sgrna$n_cells)
+
+print(paste("Median number of cells per sgRNA:", median_cells_per_sgrna))
+print(paste("Mean number of cells per sgRNA:", mean_cells_per_sgrna))
+```
+
+## Cell Counts per ATAC_bin (this excludes exons and control groups so it is counting the mean and median sgRNAs per c-CRE)
+
+```{r cell_counts_per_atac_bin}
+# Define controls to exclude
+controls_to_exclude <- c("AAVS1.control", "random.controls", "NTC")
+
+# Count number of cells per ATAC_bin, excluding controls and exon targeting
+cells_per_atac_bin <- cds_column_data %>%
+  filter(!(ATAC_bin %in% controls_to_exclude)) %>%
+  filter(!str_detect(df_name, "MSH2_exons|MSH6_exons")) %>%
+  group_by(ATAC_bin) %>%
+  summarise(n_cells = n(), .groups = 'drop')
+
+# Calculate median and mean number of cells per ATAC_bin
+median_cells_per_atac_bin <- median(cells_per_atac_bin$n_cells)
+mean_cells_per_atac_bin <- mean(cells_per_atac_bin$n_cells)
+
+print(paste("Median number of cells per ATAC_bin (excluding controls and msh2/msh6 exons):", median_cells_per_atac_bin))
+print(paste("Mean number of cells per ATAC_bin (excluding controls and msh2/msh6 exons):", mean_cells_per_atac_bin))
+```
+
+## Gene Detection Analysis
+
+Using `detect_genes` to count how many cells express each transcript (min_expr > 0) in the full experiment.
+
+```{r detect_genes}
+full_experiment_cds <- detect_genes(full_experiment_cds, min_expr = 0)
+
+# Extract and sort gene metadata by detection frequency
+gene_metadata <- rowData(full_experiment_cds) %>% 
+  as.data.frame() %>%
+  arrange(desc(num_cells_expressed)) %>%
+  mutate(rank = row_number(),
+         percentile_rank = round((rank / n()) * 100, 2))
+```
+
+## Gene Rank Analysis
+
+Determining the "detectability rank" of key genes of interest in the full KRAB experiment.
+
+```{r rank_analysis}
+genes_to_check <- c("MSH2", "MSH6", "B2M", "PGK1", "HPRT1")
+
+ranking_results <- gene_metadata %>%
+  filter(gene_short_name %in% genes_to_check) %>%
+  dplyr::select(gene_short_name, num_cells_expressed, rank, percentile_rank)
+
+print(ranking_results)
+
+# Create a new dataframe for PDF table formatting
+ranking_results_table <- ranking_results %>%
+  dplyr::select(gene_short_name, rank, percentile_rank) %>%
+  rename(gene = gene_short_name, `percentile rank` = percentile_rank)
+
+# Save table as PDF with 7pt font
+tg_rank <- tableGrob(ranking_results_table, theme = ttheme_default(base_size = 7))
+width_in <- convertWidth(sum(tg_rank$widths), "inches", valueOnly = TRUE)
+height_in <- convertHeight(sum(tg_rank$heights), "inches", valueOnly = TRUE)
+
+cairo_pdf("./outputs/plots/gene_ranking_results.pdf", width = width_in + 0.2, height = height_in + 0.2)
+grid.newpage()
+grid.draw(tg_rank)
+dev.off()
+```
+

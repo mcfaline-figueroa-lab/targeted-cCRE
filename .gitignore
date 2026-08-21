@@ -1,0 +1,52 @@
+# Script Mapping Tracker (Keep local only)
+script_mapping_tracker.md
+
+# OS-specific files
+.DS_Store
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+
+# Knitted RMarkdown Reports (Ignore all HTMLs globally)
+**/*.html
+
+# Exceptions: Allow only the final interactive figures to be tracked
+!**/outputs_stacked_jitter_plots/*.html
+!**/outputs_stacked_jitter_plots/**/*.html
+!02_targeted_cCRE_screen/outputs/sliding_window_100cells/final_plots_for_paper_main_and_supplement/*.html
+!02_targeted_cCRE_screen/outputs/sliding_window_40cells/*.html
+
+# Local Analysis Output Folders
+01_ATAC_analysis/outputs/
+**/outputs_KRAB_TMZ_survival/
+**/outputs_BE4max_TMZ_survival/
+**/outputs_mutation_plots/
+**/outputs_STON1_locus/
+**/outputs_hic_analysis/
+
+# Stacked Jitter Plots: Ignore all outputs except the interactive HTML plots
+**/outputs_stacked_jitter_plots/*
+!**/outputs_stacked_jitter_plots/*.html
+!**/outputs_stacked_jitter_plots/**/*.html
+
+# targeted_cCRE_screen: Ignore all outputs except interactive HTML plots in these folders
+02_targeted_cCRE_screen/outputs/*
+!02_targeted_cCRE_screen/outputs/sliding_window_100cells/
+02_targeted_cCRE_screen/outputs/sliding_window_100cells/*
+!02_targeted_cCRE_screen/outputs/sliding_window_100cells/final_plots_for_paper_main_and_supplement/
+02_targeted_cCRE_screen/outputs/sliding_window_100cells/final_plots_for_paper_main_and_supplement/*
+!02_targeted_cCRE_screen/outputs/sliding_window_100cells/final_plots_for_paper_main_and_supplement/*.html
+
+!02_targeted_cCRE_screen/outputs/sliding_window_40cells/
+02_targeted_cCRE_screen/outputs/sliding_window_40cells/*
+!02_targeted_cCRE_screen/outputs/sliding_window_40cells/*.html
+
+# Large Raw Data Folders (GEO downloads should be local-only)
+data/TMZ_survival_screen/raw_counts/
+data/STON1_locus/bigwig/
+data/hi_c/mcool/
+data/A172_GBM_ATAC_seq/
+data/targeted_cCRE_1/
+data/targeted_cCRE_2/
+data/targeted_cCRE_3/

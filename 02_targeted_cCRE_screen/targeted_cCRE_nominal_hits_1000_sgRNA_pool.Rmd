@@ -1,0 +1,699 @@
+---
+title: "boostrapped_lollipop_plots"
+output: html_document
+date: "2025-06-16"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+
+
+```{r}
+library(Biostrings)   
+library(dplyr)        
+library(tidyr)        
+library(stringr)     
+library(readr)
+library(ggplot2)
+library(htmlwidgets)
+library(plotly)
+library(SummarizedExperiment)
+library(Matrix)
+library(DESeq2)
+library(monocle3)
+library(janitor)
+```
+
+
+
+```{r}
+# Load 40-cell sliding window analysis outputs
+inputs_dir <- "./outputs/sliding_window_40cells"
+modeling_results_conf_int <- read.csv(file.path(inputs_dir, "modeling_results_conf_int_40cells.csv"))
+significant_windows_only <- read.csv(file.path(inputs_dir, "significant_windows_only_40cells.csv"))
+all_sgRNA_across_significant_windows <- read.csv(file.path(inputs_dir, "all_sgRNA_across_significant_windows_40cells.csv"))
+```
+
+
+##########  START random local controls for regions that are not significant hits 
+
+These will serve as negative control guides for the TMZ survival screen follow up experiment of targete-cCRE nominal hits
+these sgRNAs ideally target regions that do not have an effect on MSH2 expression in the targeted-cCRE screen
+
+Steps: choose random local control for guides that are not in the ATAC bins of any significant window, with the smallest normalized effect and confidence interval that contain 0 
+
+
+```{r}
+random_local_controls <- modeling_results_conf_int %>%
+  # 1. Keep only rows from the first dataframe with no match in the second
+  anti_join(significant_windows_only, by = "ATAC_bin") %>%
+  group_by(window) %>%
+  
+  # 3. Keep only entire window groups that meet your criteria across all rows
+  filter(
+    all(abs(mean_normalized_effect) < 0.1, na.rm = TRUE) &
+    all(confidence_interval_contain_zero == "yes_contains_0")
+  ) %>%
+  ungroup() %>%
+
+  arrange(num_unique_sgrnas)
+```
+
+
+```{r}
+length(unique(random_local_controls$window))
+```
+
+
+
+
+plot the potential local controls that seem to have very little signal
+```{r}
+# # --- 1. Define and Validate the ATAC_bin Subset ---
+
+local_controls <- random_local_controls
+
+# --- 2. Prepare the 'local_controls' Data for Plotting ---
+control_bins_sub <- local_controls %>%
+  filter(is.na(window_start)) %>%
+  arrange(window)
+experimental_bins_sub <- local_controls %>%
+  filter(!is.na(window_start)) %>%
+  arrange(window_start)
+final_bin_order_sub <- c(
+  unique(control_bins_sub$window),
+  unique(experimental_bins_sub$window)
+)
+local_controls$window <- factor(
+  local_controls$window,
+  levels = final_bin_order_sub
+)
+local_controls$dose <- factor(
+  local_controls$dose,
+  levels = sort(unique(local_controls$dose), decreasing = TRUE)
+)
+
+# --- Helper Function: Generate Distinct Colors ---
+generate_distinct_colors <- function(n) {
+  golden_ratio_conjugate <- 0.61803398875
+  h <- runif(1)
+  hues <- (h + (1:n) * golden_ratio_conjugate) %% 1
+  sv_pairs <- list(
+    c(s = 0.9, v = 0.85), c(s = 0.4, v = 0.95), c(s = 0.9, v = 0.6),
+    c(s = 0.25, v = 0.98), c(s = 0.7, v = 0.7)
+  )
+  s_values <- rep(sapply(sv_pairs, `[`, 1), length.out = n)
+  v_values <- rep(sapply(sv_pairs, `[`, 2), length.out = n)
+  hsv(h = hues, s = s_values, v = v_values)
+}
+
+# --- 3. Create a High-Contrast Master Color Key for the Subset ---
+ordered_bins_sub <- local_controls %>%
+  arrange(window) %>%
+  pull(ATAC_bin) %>%
+  unique()
+num_bins_sub <- length(ordered_bins_sub)
+distinct_colors_sub <- generate_distinct_colors(n = num_bins_sub)
+atac_color_map_sub <- data.frame(
+  ATAC_bin = ordered_bins_sub,
+  bin_color = distinct_colors_sub
+)
+
+# Use a different column name temporarily to avoid issues with the existing 'bin_color'
+atac_color_map_sub <- rename(atac_color_map_sub, bin_color_sub = bin_color)
+
+local_controls <- local_controls %>%
+  left_join(atac_color_map_sub, by = "ATAC_bin")
+
+
+# --- 4. Define the Custom Color Scale for the Subset ---
+# Calculate the threshold from the top 5% of all normalized effects
+mean_norm_effect_threshold <- quantile(
+  abs(modeling_results_conf_int$mean_normalized_effect),
+  probs = 0.95,
+  na.rm = TRUE
+)
+min_effect_sub <- min(local_controls$mean_normalized_effect, na.rm = TRUE)
+max_effect_sub <- max(local_controls$mean_normalized_effect, na.rm = TRUE)
+range_effect_sub <- max_effect_sub - min_effect_sub
+norm_neg_threshold_sub <- (-mean_norm_effect_threshold - min_effect_sub) / range_effect_sub
+norm_pos_threshold_sub <- (mean_norm_effect_threshold - min_effect_sub) / range_effect_sub
+custom_colorscale_sub <- list(
+  list(0, "blue"),
+  list(norm_neg_threshold_sub, "lightgrey"),
+  list(norm_pos_threshold_sub, "lightgrey"),
+  list(1, "red")
+)
+
+# --- 5. Build the Header and Lollipop Plots for the Subset ---
+header_data_sub <- local_controls %>%
+  select(window, ATAC_bin, bin_color_sub) %>%
+  distinct()
+p_header_sub <- plot_ly(data = header_data_sub, x = ~window, y = 1, type = 'bar',
+                    marker = list(color = ~bin_color_sub),
+                    hoverinfo = 'text', text = ~paste("ATAC Bin:", ATAC_bin)) %>%
+                layout(yaxis = list(showticklabels = FALSE, title = ""))
+
+dose_plots_sub <- list()
+dose_levels_sub <- levels(local_controls$dose)
+
+for(d in dose_levels_sub) {
+  dose_data <- filter(local_controls, dose == d)
+  dose_data_na <- filter(dose_data, is.na(mean_normalized_effect))
+  dose_data_non_na <- filter(dose_data, !is.na(mean_normalized_effect))
+
+  p_dose <- plot_ly(showlegend = FALSE) %>%
+    add_segments(data = dose_data_non_na, x = ~window, y = 0,
+                 xend = ~window, yend = ~mean_normalized_effect,
+                 color = I("gray"), hoverinfo = "none") %>%
+    add_markers(
+      data = dose_data_non_na, x = ~window, y = ~mean_normalized_effect,
+      marker = list(color = ~mean_normalized_effect, colorscale = custom_colorscale_sub,
+                    cmin = min_effect_sub, cmax = max_effect_sub,
+                    showscale = (d == "100"),
+                    colorbar = list(title = "Norm Effect")),
+      hoverinfo = 'text',
+      text = ~paste0(
+        "Effect: ", round(mean_normalized_effect, 3), "<br>",
+        "CI: ", round(conf_low_95, 3), " - ", round(conf_high_95, 3), "<br>",
+        "CI contains 0: ", confidence_interval_contain_zero, "<br>",
+        "Cell Count: ", cell_count, "<br>",
+        "Unique sgRNAs: ", num_unique_sgrnas, "<br>",
+        "Status: ", status
+      )
+    ) %>%
+    add_markers(
+      data = dose_data_na, x = ~window, y = 0,
+      marker = list(color = "black"),
+      hoverinfo = 'text',
+      text = ~paste0(
+        "Effect: NA", "<br>",
+        "CI: ", round(conf_low_95, 3), " - ", round(conf_high_95, 3), "<br>",
+        "CI contains 0: ", confidence_interval_contain_zero, "<br>",
+        "Cell Count: ", cell_count, "<br>",
+        "Unique sgRNAs: ", num_unique_sgrnas, "<br>",
+        "Status: ", status
+      )
+    ) %>%
+    add_annotations(text = paste(d), x = 1, y = 0.5,
+                    xref = "paper", yref = "paper",
+                    xanchor = "left", showarrow = FALSE,
+                    font = list(size = 14))
+
+  dose_plots_sub[[as.character(d)]] <- p_dose
+}
+
+# --- 6. Combine All Subset Plots ---
+final_plot_sub <- subplot(
+  p_header_sub, dose_plots_sub[["100"]], dose_plots_sub[["50"]],
+  dose_plots_sub[["10"]], dose_plots_sub[["0"]],
+  nrows = 5, heights = c(0.1, 0.225, 0.225, 0.225, 0.225),
+  shareX = TRUE, titleY = TRUE
+) %>%
+  layout(
+    xaxis = list(
+      title = "Genomic Window (Subset)",
+      categoryorder = "array",
+      categoryarray = final_bin_order_sub,
+      tickangle = 60
+    ),
+    title = list(text = "Dose-Dependent Effect for flow sub libary options", y = 0.99)
+  )
+
+# --- 7. Save the Final Interactive Subset Plot ---
+htmlwidgets::saveWidget(
+  widget = final_plot_sub,
+  file = "./outputs/TMZ_survival_screen_sgRNA_library/interactive_lollipop_local_control_options_for_flow.html"
+)
+```
+
+
+local controls to use - randomly sample sgRNAs from these windows:
+windows were chosen from manual inspection of interactive_lollipop_local_control_options_for_flow.html
+```{r}
+# 1. Define the specific windows you want to select
+target_windows <- c(
+  "chr2:48440510-48440660",
+  "chr2:48314106-48314256",
+  "chr2:47176827-47176977",
+  "chr2:47176152-47176302",
+  "chr2:47176102-47176252",
+  "chr2:47175652-47175802",
+  "chr2:47175902-47176052",
+  "chr2:47175677-47175827",
+  "chr2:47175877-47176027",
+  "chr2:46542573-46542723",
+  "chr2:47368968-47369118"
+)
+
+# 2. Check for any windows that are in your list but not in the dataframe
+# setdiff() finds the elements in the first vector that are not in the second
+missing_windows <- setdiff(target_windows, random_local_controls$window)
+
+# If the list of missing windows has any items, throw a warning
+if (length(missing_windows) > 0) {
+  warning("The following target windows were not found: ", 
+          paste(missing_windows, collapse = ", "))
+}
+
+# 3. Filter the dataframe to keep only the rows with matching windows
+final_local_controls_windows <- random_local_controls %>%
+  filter(window %in% target_windows)
+
+length(unique(final_local_controls_windows))
+
+# Filter for dose == 0 and select your desired columns
+final_controls_dose_zero <- final_local_controls_windows %>%
+  filter(dose == 0) %>%
+  select(ATAC_bin, window, dose, sgRNA_per_window)
+
+length(unique(final_controls_dose_zero$ATAC_bin))
+
+
+
+# Convert the comma-separated column to a long format
+long_format_local_controls <- final_controls_dose_zero %>%
+  separate_rows(sgRNA_per_window, sep = ",")
+
+
+
+#make a bedfile so you can upload to guidescan
+
+# 1. Start with your dataframe and create the three BED columns
+bed_file_data <- long_format_local_controls %>%
+  
+  # Keep only the unique window strings
+  distinct(window) %>%
+  
+  # Parse the 'window' column into three new columns
+  separate(
+    col = window, 
+    into = c("chr", "start", "end"), 
+    sep = "[:-]", 
+    convert = TRUE
+  )
+
+# 2. Define the full output file path
+# (Note: This is commented out because we already provide the GuideScan results that we load in below. 
+# However, this is the bed file you would need to generate if you wanted to run GuideScan yourself)
+#output_file_path <- "./outputs/TMZ_survival_screen_sgRNA_library/local_control_guide_bedfiles_for_guidescan.bed"
+
+# # 3. Save the data as a proper BED file (tab-separated, no header)
+# write.table(
+#   bed_file_data,
+#   file = output_file_path,
+#   sep = "\t",
+#   quote = FALSE,
+#   row.names = FALSE,
+#   col.names = FALSE
+# )
+
+##end making bedfile
+
+#load in guidescan dataframe
+file_path <- "../data/TMZ_survival_screen/results_guidescan.csv"
+
+guidescan_data <- read_csv(file_path) %>%
+  clean_names()
+
+print(colnames(guidescan_data))
+
+unique(str_length(guidescan_data$g_rna_seq))
+length(unique(guidescan_data$region_name))
+unique(guidescan_data$pam)
+
+head(guidescan_data)
+
+
+# Perform the left join to add guidescan data
+guidescan_local_controls <- left_join(
+  long_format_local_controls,
+  guidescan_data,
+  by = c("window" = "region_name", "sgRNA_per_window" = "g_rna_seq")
+)
+
+length(unique(guidescan_local_controls$window)) # want this to stay the same after I filter for specificity > 0.2
+# See how many unique guides remain
+n_distinct(guidescan_local_controls$sgRNA_per_window)
+
+
+#filter to keep guides with specificty >=0.2
+# Filter the merged dataframe to keep only guides with high specificity
+CFD_filtered_guidescan_local_controls <- guidescan_local_controls %>%
+  # Keep rows where the specificity score is 0.2 or greater
+  filter(specificity >= 0.2)
+
+n_distinct(CFD_filtered_guidescan_local_controls$sgRNA_per_window)
+length(unique(CFD_filtered_guidescan_local_controls$window)) 
+```
+
+
+```{r}
+#now randomly sample to get 15 local random controls:
+
+# Stage 1: Create a dataframe containing the randomly chosen unique sgRNAs for each ATAC_bin.
+sampled_sgrnas <- CFD_filtered_guidescan_local_controls %>%
+  # Get the unique sgRNAs for each bin
+  distinct(ATAC_bin, sgRNA_per_window) %>%
+  # Now, from that unique list, sample 3
+  group_by(ATAC_bin) %>%
+  slice_sample(n = 3) %>%
+  ungroup()
+
+# Stage 2: Use the list from Stage 1 to retrieve the full rows
+# from the original dataframe.
+final_randomly_chosen_local_controls_CFD_filtered <- CFD_filtered_guidescan_local_controls %>%
+  # Keep only rows that match one of our chosen sgRNAs for that bin
+  semi_join(sampled_sgrnas, by = c("ATAC_bin", "sgRNA_per_window")) %>%
+  
+  # If a chosen sgRNA appears in multiple windows, this randomly picks ONE
+  group_by(ATAC_bin, sgRNA_per_window) %>%
+  slice_sample(n = 1) %>%
+  ungroup()
+
+length(unique(final_randomly_chosen_local_controls_CFD_filtered$ATAC_bin))
+length(unique(final_randomly_chosen_local_controls_CFD_filtered$window))
+length(unique(final_randomly_chosen_local_controls_CFD_filtered$sgRNA_per_window))
+
+
+```
+
+
+only save final_randomly_chosen_local_controls_CFD_filtered once because otherwise it is random so it will change each time. And then read back in the one I have statically saved to use (static one should have been made 9/15/25 at 10:30 pm)
+```{r}
+
+# 1. Define the full path for your output file
+# (Note: You can save the randomly chosen local controls you generated if you want, 
+# however, it is random so it will be different than the final ones chosen for our library. 
+# Therefore, we load in the final randomly chosen local controls we generated below.)
+# output_path <- "./outputs/TMZ_survival_screen_sgRNA_library/final_randomly_chosen_local_controls_CFD_filtered.csv"
+
+
+
+# --- STEP 2:  Run this part ONCE to save your random sample --- Comment out the write.csv command after running it ---
+# This prevents you from accidentally overwriting your static file in the future.
+# write.csv(
+#   final_randomly_chosen_local_controls_CFD_filtered,
+#   file = output_path,
+#   row.names = FALSE
+# )
+
+
+# --- STEP 3: Use this line to read the static file back in for all future analysis ---
+input_path <- "../data/TMZ_survival_screen/final_randomly_chosen_local_controls_CFD_filtered.csv"
+
+
+readcsv_final_randomly_chosen_local_controls_CFD_filtered <- read_csv(
+  input_path,
+  show_col_types = FALSE
+)
+
+# Remove the specific dataframe from your environment so I can't accidentally use it downstream, use readcsv_final_randomly_chosen_local_controls_CFD_filtered instead
+rm(final_randomly_chosen_local_controls_CFD_filtered)
+```
+
+
+######### END choosing random local control sgRNAs from regions that were not significant hits
+
+
+
+
+##########################
+calculating # of sgRNAs from significant_windows_only
+
+```{r}
+
+all_sgRNA_across_significant_windows <- significant_windows_only %>%
+  select(ATAC_bin, window, window_start, window_end, sgRNA_per_window) %>%
+  separate_rows(sgRNA_per_window, sep = ",") %>%
+  rename(sgRNA.sequence = sgRNA_per_window)
+
+head(all_sgRNA_across_significant_windows)
+
+# Get the final count of unique sgRNAs
+num_unique_sgrnas <- length(unique(all_sgRNA_across_significant_windows$sgRNA.sequence))
+
+print(paste("Total number of unique sgRNAs across all significant windows before getting rid of random targeting controls:", num_unique_sgrnas))
+
+
+```
+
+
+
+```{r}
+#Get rid of random targeting controls
+drop_random_controls <- all_sgRNA_across_significant_windows %>% filter(ATAC_bin != "random.controls")
+
+experimental_sgRNA_pool_642_guides <- drop_random_controls %>% select(ATAC_bin, sgRNA.sequence, window)
+
+#Check that there are 642 unique sgRNAs 
+print(paste("Total number of unique sgRNAs across all significant windows:", length(unique(experimental_sgRNA_pool_642_guides$sgRNA.sequence))))
+
+#number of unique windows
+print(paste("Total number of unique  significant windows:", length(unique(experimental_sgRNA_pool_642_guides$window))))
+
+#number of unique ATAC bin
+print(paste("Total number of unique  significant ATAC_bins:", length(unique(experimental_sgRNA_pool_642_guides$ATAC_bin))))
+
+
+```
+these should be the numbers
+[1] "Total number of unique sgRNAs across all significant windows after dropping random targeting controls: 642"
+[1] "Total number of unique  significant windows after dropping random targeting controls: 121"
+[1] "Total number of unique  significant ATAC_bins after dropping random targeting controls: 36"
+
+```{r}
+significant_ATAC_bin_for_bed <- drop_random_controls %>% select(ATAC_bin) %>% distinct() 
+dim(significant_ATAC_bin_for_bed)
+head(significant_ATAC_bin_for_bed)
+
+
+#parse ATAC_bin column to get in bed file format
+ATAC_parsed <- significant_ATAC_bin_for_bed %>%
+  separate(
+    col = ATAC_bin, 
+    into = c("chr", "ATAC_bin_start", "ATAC_bin_end"), 
+    sep = "[:-]", 
+    remove = FALSE, 
+    convert = TRUE 
+  )
+
+head(ATAC_parsed)
+dim(ATAC_parsed)
+
+
+
+
+#number of unique ATAC bin
+print(paste("Total number of unique significant ATAC_bins in final ATAC_parsed:", length(unique(ATAC_parsed$ATAC_bin))))
+print(paste("Total number of unique significant ATAC_bins START in final ATAC_parsed:", length(unique(ATAC_parsed$ATAC_bin_start))))
+print(paste("Total number of unique significant ATAC_bins START in final ATAC_parsed:", length(unique(ATAC_parsed$ATAC_bin_end))))
+print(paste("unique chromosomes in final ATAC_parsed:", unique(ATAC_parsed$chr)))
+
+
+```
+
+
+Read in my original sgRNA library from the big targeted cCRE screen to get control sgRNAs
+
+
+```{r}
+original_largescreen_sgrna_library <- read.csv("../data/common_references/sgRNA_library_FINAL_w_sgOPTI_CROP_adapters.csv")
+head(original_largescreen_sgrna_library)
+
+
+#get subsetted dfs for the types of controls I need
+
+# Subset for hCRISPRa_non_targeting_control
+hCRISPRa_non_targeting_control <- original_largescreen_sgrna_library %>%
+  filter(df_name == "hCRISPRa_non_targeting_control")
+
+# Subset for hCRISPRi_non_targeting_control
+hCRISPRi_non_targeting_control <- original_largescreen_sgrna_library %>%
+  filter(df_name == "hCRISPRi_non_targeting_control")
+
+# Subset for AAVS1_negative_control
+AAVS1_negative_control <- original_largescreen_sgrna_library %>%
+  filter(df_name == "AAVS1_negative_control")
+
+unique(hCRISPRa_non_targeting_control$df_name)
+dim(hCRISPRa_non_targeting_control)
+
+unique(hCRISPRi_non_targeting_control$df_name)
+dim(hCRISPRi_non_targeting_control)
+
+unique(AAVS1_negative_control$df_name)
+dim(AAVS1_negative_control)
+```
+```{r}
+print(paste("number of guides allocated to controls to bring to 1000 sgRNAs:", 1000-length(unique(drop_random_controls$sgRNA.sequence))))
+print(paste("number of guides allocated to controls - 56 AAVS1 controls:", 358-nrow(AAVS1_negative_control)))
+print(paste("number of guides allocated to NTC controls (358 total - 56 AAVS1 controls - 15 local random controls):", 358-nrow(AAVS1_negative_control)-nrow(readcsv_final_randomly_chosen_local_controls_CFD_filtered)))
+print(paste("percent of guide library that is all of negative controls combined:", (358/1000)*100))
+```
+
+```{r}
+print(paste("number of guides per CRISPRi_NTC and CRISPRa_NTC = 144 &143 respectively:", 287==144+143))
+
+# Take rows 1 through 151 from the hCRISPRa dataframe
+hCRISPRa_NTC_subset <- hCRISPRa_non_targeting_control[1:143, ]
+
+# Take rows 1 through 151 from the hCRISPRi dataframe
+hCRISPRi_NTC_subset <- hCRISPRi_non_targeting_control[1:144, ]
+
+# Check the number of rows in the new subset
+nrow(hCRISPRa_NTC_subset)# Expected output: [1] 143
+length(unique(hCRISPRa_NTC_subset$sgRNA.sequence))
+
+nrow(hCRISPRi_NTC_subset)# Expected output: [1] 144
+length(unique(hCRISPRi_NTC_subset$sgRNA.sequence))
+```
+
+
+
+#now combine the negative controls with the 642 experimental sgRNA hit pool:
+
+```{r}
+head(experimental_sgRNA_pool_642_guides)
+dim(experimental_sgRNA_pool_642_guides)
+
+#get rid of window column so  you can collapse distinct guides together
+distinct_experimental_sgRNA_pool_642_guides <- experimental_sgRNA_pool_642_guides %>%
+  select(ATAC_bin, sgRNA.sequence) %>%
+  distinct()
+
+distinct_experimental_sgRNA_pool_642_guides <- 
+  distinct_experimental_sgRNA_pool_642_guides %>%
+  mutate(df_name = "hits_for_FACS_followup")
+
+head(distinct_experimental_sgRNA_pool_642_guides)
+dim(distinct_experimental_sgRNA_pool_642_guides)
+
+```
+
+```{r}
+to_combine_hCRISPRa_non_targeting_control <- hCRISPRa_NTC_subset %>% select(sgRNA.sequence, df_name, Gene.Symbol)
+head(to_combine_hCRISPRa_non_targeting_control)
+nrow(to_combine_hCRISPRa_non_targeting_control)
+
+to_combine_hCRISPRi_non_targeting_control <- hCRISPRi_NTC_subset %>% select(sgRNA.sequence, df_name, Gene.Symbol)
+head(to_combine_hCRISPRi_non_targeting_control)
+nrow(to_combine_hCRISPRi_non_targeting_control)
+
+
+
+to_combine_AAVS1_negative_control <- AAVS1_negative_control %>% select(sgRNA.sequence, df_name, Gene.Symbol)
+head(to_combine_AAVS1_negative_control)
+nrow(to_combine_AAVS1_negative_control)
+
+
+to_combine_randomly_chosen_local_controls_CFD_filtered <-
+  readcsv_final_randomly_chosen_local_controls_CFD_filtered %>%
+  select(ATAC_bin, sgRNA.sequence = sgRNA_per_window) %>%
+  mutate(df_name = "local_negative_controls")
+
+
+
+head(to_combine_randomly_chosen_local_controls_CFD_filtered)
+nrow(to_combine_randomly_chosen_local_controls_CFD_filtered)
+```
+
+
+#combine the 642 hit sgRNAs and the AAVS1, crispri and crispra ntc dataframes - you should get 1000 unique sgRNA.sequence
+```{r}
+
+# Combine the four data frames into one
+combined_library_large_pool <- bind_rows(
+  distinct_experimental_sgRNA_pool_642_guides,
+  to_combine_hCRISPRa_non_targeting_control,
+  to_combine_hCRISPRi_non_targeting_control,
+  to_combine_AAVS1_negative_control,
+  to_combine_randomly_chosen_local_controls_CFD_filtered
+)
+
+length(unique(combined_library_large_pool$sgRNA.sequence)) #this should be 1000
+```
+
+
+```{r}
+final_sgRNA_lib_w_CROP_adapters <- combined_library_large_pool %>%
+  mutate(Left_CROP_sgOPTI_adapter = "atcttgtggaaaggacgaaacaccG") %>%
+  mutate(Right_CROP_sgOPTI_adapter = "gtttaagagctatgctggaaacagcatagcaagt") %>%
+  mutate(sgRNA_w_CROPsgOPTI_adapters = paste0(Left_CROP_sgOPTI_adapter, sgRNA.sequence, Right_CROP_sgOPTI_adapter)) %>%
+  select(
+    sgRNA_w_CROPsgOPTI_adapters, 
+    sgRNA.sequence, 
+    Left_CROP_sgOPTI_adapter, 
+    Right_CROP_sgOPTI_adapter, 
+    everything()
+  )
+```
+
+
+
+save another version for the supplementary table with cleaned up df_name
+```{r}
+for_supp_table_final_sgRNA_lib_w_CROP_adapters <- final_sgRNA_lib_w_CROP_adapters %>%
+  mutate(df_name = ifelse(df_name == "hits_for_FACS_followup", "hits_for_followup", df_name))
+
+write.csv(
+  for_supp_table_final_sgRNA_lib_w_CROP_adapters,
+  file = "./outputs/TMZ_survival_screen_sgRNA_library/TMZ_survival_screen_pooled_1000_guides_for_publishing.csv",
+  row.names = FALSE
+)
+```
+
+
+sanity check that all the guides I just made with adapters do exist in my original 8000+ guide screen pool:
+```{r}
+# Create a logical vector: TRUE if a match is found in the original library, FALSE if not
+has_match <- final_sgRNA_lib_w_CROP_adapters$sgRNA_w_CROPsgOPTI_adapters %in% original_largescreen_sgrna_library$sgRNA_w_CROPsgOPTI_adapters
+
+# Use this logical vector to find the rows in your final library that DO NOT have a match
+unmatched_guides <- final_sgRNA_lib_w_CROP_adapters[!has_match, ]
+
+# Check if any unmatched guides were found and print the appropriate message
+if (nrow(unmatched_guides) == 0) {
+  print("Success! All guides in the final library have a match in the original library.")
+} else {
+  print("Warning: The following guides were not found in the original library:")
+  print(unmatched_guides)
+}
+```
+
+
+keep just sgRNA column with adaptersfor genscript order spreadsheet
+```{r}
+# 1. Create a new data frame with only the column you want to keep
+guides_to_order <- final_sgRNA_lib_w_CROP_adapters %>%
+  select(sgRNA_w_CROPsgOPTI_adapters)
+
+# 2. Define the full output file path
+output_file_path <- "./outputs/TMZ_survival_screen_sgRNA_library/TMZ_survival_screen_pooled_1000_sgRNA_lib_genscript_order.csv"
+
+# 3. Save the new data frame to a CSV file
+write.csv(guides_to_order, file = output_file_path, row.names = FALSE, quote = FALSE)
+```
+
+
+```{r}
+length(unique(guides_to_order$sgRNA_w_CROPsgOPTI_adapters)) #this should be the 1000 sgRNAs
+unique(str_length(guides_to_order$sgRNA_w_CROPsgOPTI_adapters)) #with crop homology all guides should be 79bp long
+```
+
+
+
+
+
+
+
+
+
+
+
+
+

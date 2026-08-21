@@ -1,0 +1,936 @@
+---
+title: "Broad Peaks Final Analysis (Refactored)"
+output: html_document
+date: "2024-02-18"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+1. Setup and Data Import
+```{r}
+library(dplyr)
+library(tidyr)
+library(DESeq2)
+library(pheatmap)
+
+# --- Define Output Path ---
+# Using relative path for GitHub repository
+output_dir <- "./outputs/ATAC_analysis"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+# --- Define Subfolders for Paper Figures/Tables ---
+main_fig_dir <- file.path(output_dir, "final_main_paper_figures")
+if (!dir.exists(main_fig_dir)) dir.create(main_fig_dir, recursive = TRUE)
+
+supp_dir <- file.path(output_dir, "final_supplemental_figs_tables_for_paper")
+if (!dir.exists(supp_dir)) dir.create(supp_dir, recursive = TRUE)
+
+# --- 1. Load Raw Counts (Skip header line 1) ---
+featureCounts_raw <- read.delim(gzfile("../data/A172_GBM_ATAC_seq/GSM9825200_consensus_peaks.mLb.clN.featureCounts.txt.gz"),
+  header = TRUE, sep = "\t", skip = 1
+)
+
+# --- 2. Filter Bad Samples (Programmatic Removal) ---
+# Removing X48hr_50_R3 and X96hr_10_R2 due to QC issues
+featureCounts <- featureCounts_raw %>%
+  dplyr::select(!c("X48hr_50_R3.mLb.clN.bam", "X96hr_10_R2.mLb.clN.bam"))
+
+# --- 3. Load Annotation File ---
+annotate_peaks_raw <- read.delim(gzfile("../data/A172_GBM_ATAC_seq/GSM9825200_consensus_peaks.mLb.clN.annotatePeaks.txt.gz"),
+  header = TRUE, sep = "\t"
+)
+
+# Rename first column to 'id' to match downstream logic
+colnames(annotate_peaks_raw)[1] <- "id"
+```
+
+
+2. Prepare Data for DESeq2
+```{r}
+# --- 1. Create Count Matrix ---
+# Separate metadata (cols 1-6) from counts (cols 7-end)
+count_matrix <- as.matrix(featureCounts[, 7:ncol(featureCounts)])
+rownames(count_matrix) <- featureCounts$Geneid
+
+# --- 2. Create Metadata (colData) ---
+# Extract sample names from matrix columns
+sample_names <- colnames(count_matrix)
+
+# Create a dataframe for parsing
+AS_cell_metadata_df <- data.frame(sample_id = sample_names)
+
+# Parse string: "X48hr_0_R1.mLb.clN.bam" -> "48hr", "0", "R1"
+AS_cell_metadata_df <- AS_cell_metadata_df %>%
+  mutate(
+    temp_name = gsub("X", "", sample_id), # Remove leading X
+    temp_name = gsub(".mLb.clN.bam", "", temp_name) # Remove suffix
+  ) %>%
+  separate(temp_name, into = c("hours", "TMZ_concentration", "replicate_number"), sep = "_") %>%
+  mutate(
+    hours_and_TMZ = paste(hours, TMZ_concentration, sep = "_")
+  )
+
+# Set Factor Levels (Control Reference is 48hr_0)
+AS_cell_metadata_df$TMZ_concentration <- factor(AS_cell_metadata_df$TMZ_concentration, levels = c("0", "10", "50", "100"))
+AS_cell_metadata_df$hours <- factor(AS_cell_metadata_df$hours, levels = c("48hr", "96hr"))
+AS_cell_metadata_df$replicate_number <- factor(AS_cell_metadata_df$replicate_number, levels = c("R1", "R2", "R3", "R4"))
+AS_cell_metadata_df$hours_and_TMZ <- factor(AS_cell_metadata_df$hours_and_TMZ,
+  levels = c(
+    "48hr_0", "48hr_10", "48hr_50", "48hr_100",
+    "96hr_0", "96hr_10", "96hr_50", "96hr_100"
+  )
+)
+
+# Verify alignment
+if (!all(rownames(AS_cell_metadata_df$sample_id) == colnames(count_matrix))) {
+  stop("Sample names do not match count matrix columns!")
+}
+```
+
+
+3. Run DESeq2
+```{r}
+# Create DESeq DataSet
+AS_dds <- DESeqDataSetFromMatrix(
+  countData = count_matrix,
+  colData = AS_cell_metadata_df,
+  design = ~ hours_and_TMZ + replicate_number
+)
+
+# Run Differential Analysis
+AS_atacDDS <- DESeq(AS_dds)
+```
+
+4. Extract Specific Contrasts
+```{r}
+# --- 48 Hour Comparisons ---
+ds_res_dose_48_10 <- results(AS_atacDDS, c("hours_and_TMZ", "48hr_10", "48hr_0"))
+ds_res_dose_48_10$term <- "48_10"
+ds_res_dose_48_10$id <- rownames(ds_res_dose_48_10)
+
+ds_res_dose_48_50 <- results(AS_atacDDS, c("hours_and_TMZ", "48hr_50", "48hr_0"))
+ds_res_dose_48_50$term <- "48_50"
+ds_res_dose_48_50$id <- rownames(ds_res_dose_48_50)
+
+ds_res_dose_48_100 <- results(AS_atacDDS, c("hours_and_TMZ", "48hr_100", "48hr_0"))
+ds_res_dose_48_100$term <- "48_100"
+ds_res_dose_48_100$id <- rownames(ds_res_dose_48_100)
+
+# --- 96 Hour Comparisons ---
+ds_res_dose_96_10 <- results(AS_atacDDS, c("hours_and_TMZ", "96hr_10", "96hr_0"))
+ds_res_dose_96_10$term <- "96_10"
+ds_res_dose_96_10$id <- rownames(ds_res_dose_96_10)
+
+ds_res_dose_96_50 <- results(AS_atacDDS, c("hours_and_TMZ", "96hr_50", "96hr_0"))
+ds_res_dose_96_50$term <- "96_50"
+ds_res_dose_96_50$id <- rownames(ds_res_dose_96_50)
+
+ds_res_dose_96_100 <- results(AS_atacDDS, c("hours_and_TMZ", "96hr_100", "96hr_0"))
+ds_res_dose_96_100$term <- "96_100"
+ds_res_dose_96_100$id <- rownames(ds_res_dose_96_100)
+
+# Combine and Filter for Significance
+AS_ds_res_dose <- rbind(
+  ds_res_dose_48_10, ds_res_dose_48_50, ds_res_dose_48_100,
+  ds_res_dose_96_10, ds_res_dose_96_50, ds_res_dose_96_100
+) %>%
+  as.data.frame()
+
+AS_ds_res_dose$padj <- p.adjust(AS_ds_res_dose$pvalue, method = "BH")
+
+# Extract Significant IDs (DAS)
+AS_das <- AS_ds_res_dose %>%
+  filter(padj < 0.05) %>%
+  pull(id) %>%
+  unique()
+
+print(paste("Number of Significant Peaks:", length(AS_das)))
+
+# Create a supplementary table dataframe keeping all columns without modifying AS_ds_res_dose
+supp_table_DAS <- AS_ds_res_dose %>%
+  filter(padj < 0.05) %>%
+  arrange(id)
+
+# Check that all IDs in supp_table_DAS have a match in AS_das
+ids_match_check <- all(supp_table_DAS$id %in% AS_das)
+print(paste("Do all IDs in supp_table_DAS have a match in AS_das?", ids_match_check))
+
+# Save the supplementary table to CSV
+supp_table_out_dir <- supp_dir
+if (!dir.exists(supp_table_out_dir)) dir.create(supp_table_out_dir, recursive = TRUE)
+write.csv(supp_table_DAS, file.path(supp_table_out_dir, "DAS_all_sig_peaks.csv"), row.names = FALSE)
+```
+
+
+5. Group-Averaged Heatmap
+```{r}
+## 5. Heatmap Generation (High-Contrast / Rasterized for Publication)
+
+library(ComplexHeatmap)
+
+# 1. Get VST Data
+vst_data <- vst(AS_atacDDS, blind = FALSE)
+vst_matrix <- assay(vst_data)
+
+# 2. Subset for Significant Peaks (DAS)
+das_vst_matrix <- vst_matrix[rownames(vst_matrix) %in% AS_das, ]
+
+# 3. Calculate Mean VST per Condition
+condition_map <- setNames(AS_cell_metadata_df$hours_and_TMZ, AS_cell_metadata_df$sample_id)
+unique_conditions <- levels(AS_cell_metadata_df$hours_and_TMZ)
+
+das_vst_mean <- sapply(unique_conditions, function(cond) {
+  samples <- names(condition_map)[condition_map == cond]
+  if (length(samples) > 1) {
+    rowMeans(das_vst_matrix[, samples])
+  } else {
+    das_vst_matrix[, samples]
+  }
+})
+
+# 4. Z-Score Scale
+z_score_matrix <- t(scale(t(das_vst_mean)))
+
+# 5. Define Column Order Explicitly
+col_order <- c(
+  "48hr_0", "48hr_10", "48hr_50", "48hr_100",
+  "96hr_0", "96hr_10", "96hr_50", "96hr_100"
+)
+z_score_matrix <- z_score_matrix[, col_order]
+
+# 6. Plot Heatmap for Adobe Illustrator
+# CHANGE: Using the pdf() "sandwich" to force the 20-inch height and save properly.
+pdf_filename <- file.path(output_dir, "heatmap_final_vst_for_illustrator.pdf")
+
+# Start recording to PDF
+pdf(pdf_filename, width = 4, height = 5)
+
+# Draw the heatmap
+ComplexHeatmap::pheatmap(z_score_matrix,
+  cluster_cols = FALSE,
+  show_rownames = FALSE,
+  clustering_method = "ward.D2",
+  treeheight_row = 15,
+  fontsize = 8,
+  # NEW: Descriptive label for your legend
+  name = "Relative\nAccessibility",
+  color = colorRampPalette(c("navy", "white", "red"))(50),
+  breaks = seq(-2, 2, length.out = 50),
+  cutree_rows = 4,
+  gaps_col = 4,
+  use_raster = TRUE,
+  raster_quality = 10,
+  main = "Differential Accessibility\n(Grouped Mean VST)"
+)
+
+# Stop recording and save the file
+dev.off()
+```
+
+6. Verification & Annotation Merge
+```{r}
+## 6. Verification & Annotation Merge
+
+# Create the summary dataframe you asked to check
+# We merge the metadata (Chr, Start, End) with the DAS list
+
+# 1. Prepare IDs (Source: featureCounts)
+# CHANGE: We ONLY keep the ID here. We discard featureCounts coordinates
+# because they have a 1-bp mismatch with your preferred annotation format.
+das_ids_only <- featureCounts %>%
+  dplyr::filter(Geneid %in% AS_das) %>%
+  dplyr::select(Geneid) %>%
+  dplyr::rename(id = Geneid)
+
+# 2. Merge with Full Annotation (Source: annotatePeaks.txt)
+# CHANGE: We join the IDs with the FULL annotation file.
+# This ensures Chr, Start, End come from the annotation file (Start.y in your screenshot).
+merged_DAS_summary_new <- left_join(das_ids_only, annotate_peaks_raw, by = "id")
+
+# Save Summary Table to Figures Folder
+summary_file <- file.path(output_dir, "updated_DAS_summary.RDS")
+saveRDS(merged_DAS_summary_new, summary_file)
+
+# --- 2b. Export BED files ---
+bed_dir <- file.path(output_dir, "FINAL_bed_files_for_genome_browser_3_12_26")
+if (!dir.exists(bed_dir)) dir.create(bed_dir, recursive = TRUE)
+
+# Export merged_DAS_summary_new as BED format
+bed_das <- merged_DAS_summary_new %>%
+  dplyr::select(Chr, Start, End, id) %>%
+  dplyr::rename(chr = Chr, start = Start, end = End)
+
+write.table(bed_das,
+  file.path(bed_dir, "3_12_26_diff_accessible_peaks_FINAL_for_genomic_browser.bed"),
+  sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE
+)
+
+# Export annotate_peaks_raw as BED format
+bed_raw <- annotate_peaks_raw %>%
+  dplyr::select(Chr, Start, End, id) %>%
+  dplyr::rename(chr = Chr, start = Start, end = End)
+
+write.table(bed_raw,
+  file.path(bed_dir, "3_12_26_all_peaks_FINAL_for_genomic_browser.bed"),
+  sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE
+)
+
+
+```
+
+
+Genomic Annotation Distribution for DAS
+```{r}
+## 7. Genomic Annotation Distribution (High-Saturation Pie Chart)
+
+library(ggplot2)
+library(stringr)
+
+# 1. Simplify Annotations
+# CHANGED: Keeps the original 'promoter-TSS' label as requested
+merged_DAS_summary_new <- merged_DAS_summary_new %>%
+  mutate(Simple_Annotation = str_extract(Annotation, "^[^ ]+"))
+
+# 2. Calculate Percentages for the Table
+annotation_stats <- merged_DAS_summary_new %>%
+  group_by(Simple_Annotation) %>%
+  summarise(count = n()) %>%
+  mutate(percentage = (count / sum(count)) * 100)
+
+# 3. Save the actual table for text referencing
+# Filename: DAS_annotation_distribution_table.csv
+write.csv(annotation_stats, file.path(supp_dir, "DAS_annotation_distribution_table.csv"), row.names = FALSE)
+
+# 4. Create the Pie Chart
+# - CHANGED: Updated title to "Genomic Distribution of Differentially Accessible Sites"
+# - CHANGED: Switched to 'Set1' for maximum color saturation.
+# - REMOVED: geom_text labels for a cleaner, publication-ready look.
+p_pie <- ggplot(annotation_stats, aes(x = "", y = percentage, fill = Simple_Annotation)) +
+  geom_bar(stat = "identity", width = 1, color = "white", linewidth = 0.1) +
+  coord_polar("y", start = 0) +
+  theme_void() +
+  scale_fill_brewer(palette = "Set1") +
+  labs(
+    title = "Differentially\nAccessible Sites",
+    fill = "Genomic Feature"
+  ) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 5),
+    legend.title = element_text(face = "bold", size = 5),
+    legend.text = element_text(size = 5),
+    legend.key.size = unit(3, "mm"),
+    legend.spacing.y = unit(1, "mm")
+  )
+
+# 5. Save the final PDFs
+# Version 1: 4x4 with Legend
+ggsave(file.path(main_fig_dir, "DAS_annotation_distribution_pie_chart.pdf"), 
+       plot = p_pie, width = 4, height = 4)
+
+# Version 2: 0.75x0.75 NO Legend
+ggsave(file.path(main_fig_dir, "DAS_annotation_distribution_pie_chart_no_legend.pdf"), 
+       plot = p_pie + theme(legend.position = "none"), width = 0.75, height = 0.75)
+```
+
+
+Genomic Annotation Distribution for all accessible sites
+```{r}
+## 8. Total Peak Distribution (All nf-core peaks)
+
+# 1. Simplify Annotations for the full raw dataset
+# Keeps 'promoter-TSS' as requested
+annotate_peaks_raw <- annotate_peaks_raw %>%
+  mutate(Simple_Annotation = str_extract(Annotation, "^[^ ]+"))
+
+# 2. Calculate Percentages for the Total Dataset
+total_annotation_stats <- annotate_peaks_raw %>%
+  group_by(Simple_Annotation) %>%
+  summarise(count = n()) %>%
+  mutate(percentage = (count / sum(count)) * 100)
+
+# 3. Save the actual table for the full peakset
+write.csv(total_annotation_stats,
+  file.path(supp_dir, "All_accessible_Peaks_annotation_distribution_table.csv"),
+  row.names = FALSE
+)
+
+# 4. Create the Pie Chart
+p_total_pie <- ggplot(total_annotation_stats, aes(x = "", y = percentage, fill = Simple_Annotation)) +
+  geom_bar(stat = "identity", width = 1, color = "white", linewidth = 0.1) +
+  coord_polar("y", start = 0) +
+  theme_void() +
+  scale_fill_brewer(palette = "Set1") +
+  labs(
+    title = "All Accessible\nSites",
+    fill = "Genomic Feature"
+  ) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 5),
+    legend.title = element_text(face = "bold", size = 5),
+    legend.text = element_text(size = 5),
+    legend.key.size = unit(3, "mm"),
+    legend.spacing.y = unit(1, "mm")
+  )
+
+# 5. Save the final PDFs
+# Version 1: 4x4 with Legend
+ggsave(file.path(main_fig_dir, "All_accessible_peaks_annotation_distribution_pie_chart.pdf"), 
+       plot = p_total_pie, width = 4, height = 4)
+
+# Version 2: 0.75x0.75 NO Legend
+ggsave(file.path(main_fig_dir, "All_accessible_peaks_annotation_distribution_pie_chart_no_legend.pdf"), 
+       plot = p_total_pie + theme(legend.position = "none"), width = 0.75, height = 0.75)
+```
+
+## 9. Experimental: Heatmap with 2Mb Proximity Annotation
+
+```{r}
+library(GenomicFeatures)
+library(org.Hs.eg.db)
+library(ComplexHeatmap)
+library(circlize)
+
+# 1. Target genes and MANE loader
+target_genes <- c("MSH2", "MSH6", "MLH1", "PMS2")
+mane_gff_path <- "../data/MANE/MANE.GRCh38.v1.5.refseq_genomic.gff.gz"
+
+if (!exists("txdb_mane")) {
+  txdb_mane <- makeTxDbFromGFF(mane_gff_path, format = "gff")
+  seqlevelsStyle(txdb_mane) <- "UCSC"
+}
+
+# robust gene lookup helper
+get_real_db_key <- function(symbol, txdb) {
+  all_keys <- keys(txdb, keytype = "GENEID")
+  if (symbol %in% all_keys) {
+    return(symbol)
+  }
+  entrez_id <- suppressMessages(mapIds(org.Hs.eg.db, keys = symbol, column = "ENTREZID", keytype = "SYMBOL", multiVals = "first"))
+  if (!is.na(entrez_id)) {
+    if (entrez_id %in% all_keys) {
+      return(entrez_id)
+    }
+    if (paste0("GeneID:", entrez_id) %in% all_keys) {
+      return(paste0("GeneID:", entrez_id))
+    }
+  }
+  return(NULL)
+}
+
+# 2. Get 2Mb windows for targets
+target_ranges <- GRanges()
+for (g in target_genes) {
+  db_key <- get_real_db_key(g, txdb_mane)
+  if (!is.null(db_key)) {
+    g_range <- genes(txdb_mane)[db_key]
+    midpoint <- (start(g_range) + end(g_range)) / 2
+    chrom <- as.character(seqnames(g_range))[1]
+    w_start <- floor(midpoint - 1000000)
+    w_end <- floor(midpoint + 1000000)
+    tmp_gr <- GRanges(chrom, IRanges(w_start, w_end))
+    tmp_gr$symbol <- g
+    target_ranges <- c(target_ranges, tmp_gr)
+  }
+}
+
+# 3. Calculate total accessible peaks per gene (Regardless of DAS status)
+# This block is independent and does not affect the heatmap or DAS calculations.
+all_peaks_gr <- GRanges(
+  seqnames = annotate_peaks_raw$Chr,
+  ranges = IRanges(start = annotate_peaks_raw$Start, end = annotate_peaks_raw$End),
+  id = annotate_peaks_raw$id
+)
+
+# Create a separate target ranges object just for baseline calculations to not affect downstream code
+baseline_target_ranges <- target_ranges
+msh2_idx <- which(baseline_target_ranges$symbol == "MSH2")
+if (length(msh2_idx) > 0) {
+  # Hardcode MSH2 2Mb region for baseline accessibility only
+  baseline_target_ranges[msh2_idx] <- GRanges("chr2", IRanges(46533132, 48533132), symbol = "MSH2")
+}
+
+overlaps_baseline <- findOverlaps(all_peaks_gr, baseline_target_ranges)
+
+print("--- Baseline Accessibility (All Peaks) Within 2Mb Windows ---")
+# Initialize an empty list to store rows for the dataframe
+baseline_peaks_list_safe <- list()
+# Initialize a vector to track ALL unique peak IDs across all target genes
+all_unique_peak_hits_safe <- c()
+
+for (g in target_genes) {
+  gene_range <- baseline_target_ranges[baseline_target_ranges$symbol == g]
+  if (length(gene_range) > 0) {
+    coords_str <- paste0(seqnames(gene_range), ":", start(gene_range), "-", end(gene_range))
+    target_idx <- which(baseline_target_ranges$symbol == g)
+    gene_hits <- queryHits(overlaps_baseline)[subjectHits(overlaps_baseline) == target_idx]
+    unique_peaks <- length(unique(gene_hits))
+    
+    # Store data
+    baseline_peaks_list_safe[[g]] <- data.frame(
+        Gene = g,
+        Coordinates = coords_str,
+        Accessible_Peaks_Within_2Mb = unique_peaks,
+        stringsAsFactors = FALSE
+    )
+    
+    # Track all peak hits to find total unique across all genes
+    all_unique_peak_hits_safe <- c(all_unique_peak_hits_safe, gene_hits)
+    
+    print(paste0(g, " [", coords_str, "]: ", unique_peaks, " accessible peaks within 2 Mb"))
+  }
+}
+
+# Bind list into a single dataframe
+baseline_accessible_peaks_df_safe <- do.call(rbind, baseline_peaks_list_safe)
+rownames(baseline_accessible_peaks_df_safe) <- NULL
+
+# Print the total unique peaks across all regions (accounting for overlapping 2Mb windows)
+total_unique_across_all_safe <- length(unique(all_unique_peak_hits_safe))
+print(paste0("Total unique accessible peaks across all combined 2Mb regions: ", total_unique_across_all_safe))
+
+# 4. Convert DAS to GRanges and find overlaps
+das_gr <- GRanges(
+  seqnames = merged_DAS_summary_new$Chr,
+  ranges = IRanges(start = merged_DAS_summary_new$Start, end = merged_DAS_summary_new$End),
+  id = merged_DAS_summary_new$id
+)
+
+overlaps <- findOverlaps(das_gr, target_ranges)
+
+# 4. Binary Matrix mapping DAS to Genes
+das_gene_mat <- matrix(0, nrow = length(das_gr), ncol = length(target_genes))
+rownames(das_gene_mat) <- das_gr$id
+colnames(das_gene_mat) <- target_genes
+
+for (i in seq_along(overlaps)) {
+  das_idx <- queryHits(overlaps)[i]
+  gene_name <- target_ranges$symbol[subjectHits(overlaps)[i]]
+  col_idx <- which(colnames(das_gene_mat) == gene_name)
+  das_gene_mat[das_idx, col_idx] <- 1
+}
+
+# align strictly to heatmap
+das_gene_mat_aligned <- das_gene_mat[rownames(z_score_matrix), ]
+
+# 5. Extract clusters from z_score_matrix
+set.seed(123)
+row_dend <- hclust(dist(z_score_matrix), method = "ward.D2")
+row_clusters <- cutree(row_dend, k = 4)
+
+# 6. Sum frequencies per cluster
+cluster_freq <- matrix(0, nrow = 4, ncol = length(target_genes))
+colnames(cluster_freq) <- target_genes
+for (k in 1:4) {
+  cluster_ids <- names(row_clusters)[row_clusters == k]
+  if (length(cluster_ids) == 1) {
+    cluster_freq[k, ] <- das_gene_mat_aligned[cluster_ids, ]
+  } else {
+    cluster_freq[k, ] <- colSums(das_gene_mat_aligned[cluster_ids, ])
+  }
+}
+
+# 7. Map back to block annotation matrix for the right
+right_anno_mat <- matrix(0, nrow = nrow(z_score_matrix), ncol = length(target_genes))
+colnames(right_anno_mat) <- target_genes
+rownames(right_anno_mat) <- rownames(z_score_matrix)
+
+for (i in 1:nrow(z_score_matrix)) {
+  c_id <- row_clusters[i]
+  right_anno_mat[i, ] <- cluster_freq[c_id, ]
+}
+
+# 8. Plot side-by-side using native ComplexHeatmap
+max_val <- max(right_anno_mat)
+
+# Custom palette: exactly 0 is white, >0 transitions into viridis
+library(viridis)
+my_colors <- c("white", viridis::viridis(49))
+
+color_fun <- colorRamp2(seq(0, max(1, max_val), length = 50), my_colors)
+
+main_col_fun <- colorRamp2(seq(-2, 2, length.out = 50), colorRampPalette(c("navy", "white", "red"))(50))
+
+ht_main <- Heatmap(z_score_matrix,
+  name = "Relative\nAccessibility",
+  col = main_col_fun,
+  cluster_columns = FALSE,
+  cluster_rows = row_dend,
+  show_row_names = FALSE,
+  row_dend_width = unit(10, "mm"),
+  row_split = 4,
+  column_split = factor(rep(c("48hr", "96hr"), each = 4), levels = c("48hr", "96hr")),
+  column_title = "DAS Grouped Mean VST",
+  row_title = NULL,
+  width = unit(4, "cm"),
+  use_raster = TRUE,
+  raster_quality = 10,
+  heatmap_legend_param = list(title_position = "topleft")
+)
+
+ht_anno <- Heatmap(right_anno_mat,
+  name = "DAS\nwithin 2Mb",
+  col = color_fun,
+  cluster_columns = FALSE,
+  show_row_names = FALSE,
+  column_names_side = "top",
+  column_names_rot = 90,
+  column_names_gp = gpar(fontsize = 7),
+  column_split = factor(target_genes, levels = target_genes),
+  column_title = NULL,
+  column_gap = unit(1, "mm"),
+  width = unit(1.3, "cm"),
+  use_raster = TRUE,
+  raster_quality = 10,
+  heatmap_legend_param = list(direction = "vertical")
+)
+
+pdf_filename_anno <- file.path(output_dir, "DAS_heatmap_2Mb_genes_of_interest_no_cluster_label.pdf")
+pdf(pdf_filename_anno, width = 7, height = 5)
+draw(ht_main + ht_anno, main_heatmap = "Relative\nAccessibility")
+dev.off()
+```
+
+## 10. Cluster Validation and Export
+
+```{r}
+# --- Create Validation Dataframes ---
+
+# 1. Full Peak-Level Binary Matrix with Cluster IDs
+# We use the raw statistical cluster assignments directly from cutree
+peak_cluster_df <- as.data.frame(das_gene_mat_aligned)
+peak_cluster_df$Cluster_ID <- row_clusters
+peak_cluster_df$Peak_ID <- rownames(peak_cluster_df)
+
+# Reorder columns to put Peak_ID and Cluster_ID first
+peak_cluster_df <- peak_cluster_df[, c("Peak_ID", "Cluster_ID", target_genes)]
+
+# Save to CSV
+write.csv(peak_cluster_df,
+  file.path(output_dir, "DAS_Peaks_2Mb_Proximity_with_Clusters.csv"),
+  row.names = FALSE
+)
+
+# Calculate and print the number of unique DAS within 2Mb of specific genes
+# Uses the target_genes variable already defined (MSH2, MSH6, MLH1, PMS2)
+# DAS that overlap more than one gene of interest are only counted once in the total
+unique_mmr_das_count <- sum(rowSums(peak_cluster_df[, target_genes, drop = FALSE]) > 0)
+print(paste("Total unique DAS within 2Mb of MMR genes (MSH2, MSH6, MLH1, PMS2):", unique_mmr_das_count))
+
+# 2. Aggregated Summary Dataframe (Genes by Cluster)
+cluster_summary_df <- as.data.frame(cluster_freq)
+cluster_summary_df$Cluster_ID <- paste0("Cluster_", 1:4)
+
+# Reorder to put Cluster_ID first
+cluster_summary_df <- cluster_summary_df[, c("Cluster_ID", target_genes)]
+
+# Add Total row
+total_row <- data.frame(Cluster_ID = "Total")
+for (g in target_genes) {
+  total_row[[g]] <- sum(cluster_summary_df[[g]])
+}
+cluster_summary_df <- rbind(cluster_summary_df, total_row)
+
+# Save to CSV
+write.csv(cluster_summary_df,
+  file.path(supp_dir, "Cluster_Summary_DAS_2Mb_Proximity.csv"),
+  row.names = FALSE
+)
+
+
+# --- Plot Duplicate Heatmap with Explicit Cluster Labels ---
+
+# Provide a categorical color mapping for the 4 statistical clusters
+cluster_colors <- c("1" = "#E41A1C", "2" = "#377EB8", "3" = "#4DAF4A", "4" = "#984EA3")
+left_anno <- rowAnnotation(
+  Cluster = as.character(row_clusters),
+  col = list(Cluster = cluster_colors),
+  show_annotation_name = FALSE,
+  simple_anno_size = unit(2, "mm"),
+  annotation_legend_param = list(
+    title_gp = gpar(fontsize = 7, fontface = "bold"),
+    labels_gp = gpar(fontsize = 7)
+  )
+)
+
+# We use the exact same matrices and splits, but tell ComplexHeatmap to print the categorical color block on the left
+ht_main_labeled <- Heatmap(z_score_matrix,
+  name = "Relative\nAccessibility",
+  col = main_col_fun,
+  cluster_columns = FALSE,
+  cluster_rows = row_dend,
+  show_row_names = FALSE,
+  row_dend_width = unit(7, "mm"),
+  row_split = 4,
+  left_annotation = left_anno,
+  row_title = NULL,
+  column_split = factor(rep(c("48hr", "96hr"), each = 4), levels = c("48hr", "96hr")),
+  column_title = "DAS Grouped Mean VST",
+  column_title_gp = gpar(fontsize = 7, fontface = "bold"),
+  column_names_gp = gpar(fontsize = 7),
+  width = unit(3, "cm"),
+  use_raster = TRUE,
+  raster_quality = 10,
+  heatmap_legend_param = list(
+    title_position = "topleft",
+    title_gp = gpar(fontsize = 7, fontface = "bold"),
+    labels_gp = gpar(fontsize = 7)
+  )
+)
+
+ht_anno_labeled <- Heatmap(right_anno_mat,
+  name = "DAS\nwithin 2Mb",
+  col = color_fun,
+  cluster_columns = FALSE,
+  show_row_names = FALSE,
+  column_names_side = "top",
+  column_names_rot = 90,
+  column_names_gp = gpar(fontsize = 7),
+  column_split = factor(target_genes, levels = target_genes),
+  column_title = NULL,
+  column_gap = unit(1, "mm"),
+  width = unit(1.1, "cm"),
+  use_raster = TRUE,
+  raster_quality = 10,
+  heatmap_legend_param = list(
+    direction = "vertical",
+    title_gp = gpar(fontsize = 7, fontface = "bold"),
+    labels_gp = gpar(fontsize = 7)
+  )
+)
+
+
+pdf_filename_val <- file.path(main_fig_dir, "Main_fig_DAS_heatmap_2Mb_genes_of_interest_CLUSTER_LABELS.pdf")
+pdf(pdf_filename_val, width = 7, height = 5) # Made slightly wider to fit the text labels
+draw(ht_main_labeled + ht_anno_labeled, 
+     main_heatmap = "Relative\nAccessibility",
+     ht_gap = unit(0.5, "mm"))
+dev.off()
+print("Validation dataframes saved and labeled heatmap plotted!")
+```
+
+
+
+## 12. Patient Data Consensus Peaks
+```{r}
+library(GenomicRanges)
+
+# --- 1. Define Directories & Files ---
+patient_dir <- "../data/patient_data/GSE174554"
+patient_bed_out_dir <- file.path(output_dir, "Patient_data_consensus_peak_sets")
+
+if (!dir.exists(patient_bed_out_dir)) dir.create(patient_bed_out_dir, recursive = TRUE)
+
+# Find properly formatted patient BED files
+patient_bed_files <- list.files(patient_dir, pattern = "_properly_formatted\\.bed$", full.names = TRUE)
+
+# Separate by Primary vs Recurrent
+primary_files <- patient_bed_files[grepl("Primary", basename(patient_bed_files))]
+recurrent_files <- patient_bed_files[grepl("Recurrent", basename(patient_bed_files))]
+
+# --- 2. Load BED files into GRanges lists ---
+load_bed_as_granges <- function(file_path) {
+  df <- read.table(file_path, header = FALSE, sep = "\t", stringsAsFactors = FALSE)
+  # Standard BED has chr in V1, start in V2, end in V3.
+  # BED is 0-indexed, so we add 1 to the start to convert to 1-indexed GRanges
+  GRanges(seqnames = df$V1, ranges = IRanges(start = df$V2 + 1, end = df$V3))
+}
+
+primary_beds <- lapply(primary_files, load_bed_as_granges)
+recurrent_beds <- lapply(recurrent_files, load_bed_as_granges)
+all_patient_beds <- c(primary_beds, recurrent_beds)
+
+# --- 3. Consensus Function ---
+make_consensus_set <- function(gr_list, min_patients = 1, gap_to_merge = 1) {
+  # Flatten all peaks into one massive pool
+  all_peaks <- unlist(GRangesList(gr_list))
+
+  # Calculate coverage: creates an Rle object of peak depth per base pair
+  cvg <- coverage(all_peaks)
+
+  # Filter for 'consensus': keep segments where coverage >= min_patients
+  # Prevent collision with dplyr::slice by explicitly calling IRanges
+  consensus_rle <- IRanges::slice(cvg, lower = min_patients)
+
+  # Convert back to GRanges
+  consensus_gr <- as(consensus_rle, "GRanges")
+
+  # Always run reduce() to merge directly adjacent fragments.
+  # Note: min.gapwidth = 1 is required to merge intervals that are perfectly continuous
+  # (e.g., end of interval A is the exact same coordinate as start of interval B)
+  consensus_gr <- reduce(consensus_gr, min.gapwidth = gap_to_merge)
+
+  return(consensus_gr)
+}
+
+# Create the three reference sets
+primary_consensus <- make_consensus_set(primary_beds, min_patients = 1, gap_to_merge = 1)
+recurrent_consensus <- make_consensus_set(recurrent_beds, min_patients = 1, gap_to_merge = 1)
+global_consensus <- make_consensus_set(all_patient_beds, min_patients = 1, gap_to_merge = 1)
+
+# --- 4. Export to BED ---
+export_consensus_bed <- function(gr, filepath) {
+  # Convert to standard BED format (0-indexed start)
+  df <- data.frame(
+    chr = as.character(seqnames(gr)),
+    start = start(gr) - 1,
+    end = end(gr)
+  )
+  write.table(df, file = filepath, sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE)
+}
+
+export_consensus_bed(primary_consensus, file.path(patient_bed_out_dir, "Patient_Primary_Consensus_min1.bed"))
+export_consensus_bed(recurrent_consensus, file.path(patient_bed_out_dir, "Patient_Recurrent_Consensus_min1.bed"))
+export_consensus_bed(global_consensus, file.path(patient_bed_out_dir, "Patient_Global_Consensus_min1.bed"))
+
+print(paste("Generated 3 patient consensus BED files in:", patient_bed_out_dir))
+```
+
+## 13. Overlap Analysis against Patient Data
+```{r}
+# --- 1. Convert to GRanges ---
+# Convert the annotate_peaks_raw dataframe to a GRanges object
+my_peaks_gr <- GRanges(
+  seqnames = annotate_peaks_raw$Chr,
+  ranges = IRanges(start = annotate_peaks_raw$Start, end = annotate_peaks_raw$End),
+  id = annotate_peaks_raw$id
+)
+
+# --- 2. Find Overlaps ---
+# The findOverlaps function finds regions that intersect by at least 1 base pair.
+# Because coordinates won't match perfectly, this is the standard way to check
+# if a peak in your data "hits" a peak in the patient data.
+overlaps <- findOverlaps(my_peaks_gr, global_consensus)
+
+# Extract counts
+# queryHits tells us which of 'my_peaks_gr' had at least one overlap
+my_peaks_overlapping <- length(unique(queryHits(overlaps)))
+my_peaks_unique <- length(my_peaks_gr) - my_peaks_overlapping
+
+# subjectHits tells us which of 'global_consensus' had at least one overlap
+patient_peaks_overlapping <- length(unique(subjectHits(overlaps)))
+patient_peaks_unique <- length(global_consensus) - patient_peaks_overlapping
+
+print(paste("Your total peaks:", length(my_peaks_gr)))
+print(paste("Patient total peaks:", length(global_consensus)))
+print(paste("My peaks that overlap a patient peak (from my peak perspective, mutltiple patient peaks can fall in one of my peaks):", my_peaks_overlapping))
+print(paste("Patient peaks that overlap your peak (from patient peak perspective):", patient_peaks_overlapping))
+
+# Add percentage calculations
+print(paste0("Percentage of your peaks that overlap at least one patient peak: ", 
+             round((my_peaks_overlapping / length(my_peaks_gr)) * 100, 2), "%"))
+print(paste0("Percentage of patient peaks that overlap your peaks: ", 
+             round((patient_peaks_overlapping / length(global_consensus)) * 100, 2), "%"))
+
+# Note: Because 1 of your broad peaks might overlap 2 smaller patient peaks,
+# the mathematical "intersection" size is slightly nuanced. A standard approach
+# for a simple proportional Venn Diagram is to use the count of your overlapping peaks.
+
+# --- 3. Plot Venn Diagram ---
+# We will use the 'eulerr' package for accurate proportional Euler/Venn diagrams
+if (!requireNamespace("eulerr", quietly = TRUE)) {
+  install.packages("eulerr")
+}
+library(eulerr)
+
+# --- 3. Plot Proportional Venn Diagram ---
+# CHANGE: Swapping to patient_peaks_overlapping perspective
+my_peaks_unique_perspective <- length(my_peaks_gr) - patient_peaks_overlapping
+
+fit <- euler(c(
+  "My Peaks" = my_peaks_unique_perspective,
+  "Patient Consensus" = patient_peaks_unique,
+  "My Peaks&Patient Consensus" = patient_peaks_overlapping
+))
+
+venn_plot <- plot(fit,
+  quantities = list(fontsize = 7),
+  labels = FALSE,
+  fills = list(fill = c("#A5EDFF", "#CCBFFF", "#B2FF8C"), alpha = 0.6),
+  main = NULL
+)
+
+# Save Proportional Version
+pdf_filename_venn <- file.path(main_fig_dir, "My_Peaks_vs_Patient_Consensus_Venn.pdf")
+pdf(pdf_filename_venn, width = 3, height = 1.5)
+print(venn_plot)
+library(grid)
+grid.text("Our Peaks", x = 0.35, y = 0.9, gp = gpar(fontsize = 7, fontface = "bold"))
+grid.text("Patient Peaks", x = 0.80, y = 0.9, gp = gpar(fontsize = 7, fontface = "bold"))
+dev.off()
+
+
+# --- 4. Plot Non-Proportional Venn Diagram (Equal Sized Circles) ---
+fit_same_size <- euler(c("A" = 1, "B" = 1, "A&B" = 0.45))
+
+venn_plot_same_size <- plot(fit_same_size,
+  quantities = list(
+    labels = c(
+      as.character(my_peaks_unique_perspective), 
+      as.character(patient_peaks_unique), 
+      as.character(patient_peaks_overlapping)
+    ),
+    fontsize = 7
+  ),
+  labels = FALSE,
+  fills = list(fill = c("#A5EDFF", "#CCBFFF", "#B2FF8C"), alpha = 0.6),
+  main = NULL
+)
+
+# Save Same-Size Version
+pdf_filename_venn_same <- file.path(main_fig_dir, "same_size_circle_venn_My_Peaks_vs_Patient_Consensus.pdf")
+pdf(pdf_filename_venn_same, width = 2, height = 1)
+print(venn_plot_same_size)
+grid.text("Our Peaks", x = 0.30, y = 0.9, gp = gpar(fontsize = 7, fontface = "bold"))
+grid.text("Patient Peaks", x = 0.75, y = 0.9, gp = gpar(fontsize = 7, fontface = "bold"))
+dev.off()
+
+print("Saved both proportional and same-size Venn diagrams!")
+```
+
+## 14. MMR Gene Baseline Accessibility (500 kb Windows)
+# This chunk calculates total accessibility in a 500kb window centered on MMR genes,
+# matching the exact coordinates used in the 'dense_and_full_gene_tracks_MMR.Rmd' script.
+
+```{r}
+# 1. Define target genes and 500kb window logic
+target_genes_500k <- c("MSH2", "MSH6", "MLH1", "PMS2")
+half_window <- 250000
+
+# 2. Create the 500kb windows
+target_ranges_500k <- GRanges()
+for (g in target_genes_500k) {
+  db_key <- get_real_db_key(g, txdb_mane) # Uses helper from Section 9
+  if (!is.null(db_key)) {
+    g_range <- genes(txdb_mane)[db_key]
+    midpoint <- (start(g_range) + end(g_range)) / 2
+    chrom <- as.character(seqnames(g_range))[1]
+    
+    # Applying the floor(midpoint - 250000) and floor(midpoint + 249999) logic
+    w_start <- floor(midpoint - half_window)
+    w_end <- floor(midpoint + (half_window - 1))
+    
+    tmp_gr <- GRanges(chrom, IRanges(w_start, w_end))
+    tmp_gr$symbol <- g
+    target_ranges_500k <- c(target_ranges_500k, tmp_gr)
+  }
+}
+
+# 3. Find overlaps with the full peak set
+# (all_peaks_gr was already defined in Section 9)
+overlaps_500k <- findOverlaps(all_peaks_gr, target_ranges_500k)
+
+print("--- Baseline Accessibility (All Peaks) Within 500 kb Windows ---")
+for (g in target_genes_500k) {
+  gene_range <- target_ranges_500k[target_ranges_500k$symbol == g]
+  if (length(gene_range) > 0) {
+    coords_str <- paste0(seqnames(gene_range), ":", start(gene_range), "-", end(gene_range))
+    target_idx <- which(target_ranges_500k$symbol == g)
+    gene_hits <- queryHits(overlaps_500k)[subjectHits(overlaps_500k) == target_idx]
+    unique_peaks <- length(unique(gene_hits))
+    print(paste0(g, " [", coords_str, "]: ", unique_peaks, " accessible peaks within 500 kb"))
+  }
+}
+```
